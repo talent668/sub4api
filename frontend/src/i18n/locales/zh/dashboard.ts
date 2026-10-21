@@ -448,6 +448,7 @@ export default {
     cacheWrite: '写入',
     serviceTier: '服务档位',
     upstreamServiceTier: '上游回声档位',
+    upstreamServiceTierUnknown: '未声明',
     serviceTierPriority: 'Fast',
     serviceTierUltrafast: 'Ultrafast',
     serviceTierFlex: 'Flex',

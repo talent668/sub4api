@@ -498,9 +498,10 @@
             <span class="text-gray-400">{{ t('usage.serviceTier') }}</span>
             <span class="font-semibold text-cyan-300">{{ getUsageServiceTierLabel(tooltipData?.service_tier, t) }}</span>
           </div>
-          <div v-if="tooltipData?.upstream_service_tier" class="flex items-center justify-between gap-6">
+          <div class="flex items-center justify-between gap-6">
             <span class="text-gray-400">{{ t('usage.upstreamServiceTier') }}</span>
-            <span class="font-semibold text-cyan-300">{{ getUsageServiceTierLabel(tooltipData?.upstream_service_tier, t) }}</span>
+            <span v-if="tooltipData?.upstream_service_tier" class="font-semibold text-cyan-300">{{ getUsageServiceTierLabel(tooltipData?.upstream_service_tier, t) }}</span>
+            <span v-else class="font-medium text-gray-500">{{ t('usage.upstreamServiceTierUnknown') }}</span>
           </div>
           <div class="flex items-center justify-between gap-6">
             <span class="text-gray-400">{{ t('usage.rate') }}</span>

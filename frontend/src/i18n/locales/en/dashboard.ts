@@ -443,6 +443,7 @@ export default {
     cacheWrite: 'Write',
     serviceTier: 'Service tier',
     upstreamServiceTier: 'Upstream tier (echo)',
+    upstreamServiceTierUnknown: 'Not declared',
     serviceTierPriority: 'Fast',
     serviceTierUltrafast: 'Ultrafast',
     serviceTierFlex: 'Flex',
