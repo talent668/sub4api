@@ -131,6 +131,10 @@ type UsageLog struct {
 	// ServiceTier records the billable request tier, e.g. OpenAI "priority" / "flex"
 	// or Anthropic "fast".
 	ServiceTier *string
+	// UpstreamServiceTier is the tier the upstream response echoed back, kept
+	// separate from ServiceTier: the private Codex backend can report
+	// "default" even when Fast was honored.
+	UpstreamServiceTier *string
 	// ReasoningEffort is the effective effort recorded for this request after
 	// group policy rewriting and model-family remapping (e.g. max -> xhigh).
 	// OpenAI: "low" / "medium" / "high" / "xhigh"; Claude: "low" / "medium" / "high" / "max".

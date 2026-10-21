@@ -447,6 +447,7 @@ export default {
     cacheRead: '读取',
     cacheWrite: '写入',
     serviceTier: '服务档位',
+    upstreamServiceTier: '上游回声档位',
     serviceTierPriority: 'Fast',
     serviceTierUltrafast: 'Ultrafast',
     serviceTierFlex: 'Flex',

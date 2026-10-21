@@ -498,6 +498,10 @@
             <span class="text-gray-400">{{ t('usage.serviceTier') }}</span>
             <span class="font-semibold text-cyan-300">{{ getUsageServiceTierLabel(tooltipData?.service_tier, t) }}</span>
           </div>
+          <div v-if="tooltipData?.upstream_service_tier" class="flex items-center justify-between gap-6">
+            <span class="text-gray-400">{{ t('usage.upstreamServiceTier') }}</span>
+            <span class="font-semibold text-cyan-300">{{ getUsageServiceTierLabel(tooltipData?.upstream_service_tier, t) }}</span>
+          </div>
           <div class="flex items-center justify-between gap-6">
             <span class="text-gray-400">{{ t('usage.rate') }}</span>
             <span class="font-semibold text-blue-400">{{ formatMultiplier(tooltipData?.rate_multiplier ?? 1) }}x</span>

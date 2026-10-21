@@ -395,6 +395,7 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		UpstreamResponseModel:    optionalTrimmedStringPtr(result.UpstreamResponseModel),
 		UpstreamModelMismatch:    upstreamModelMismatch(sentModel, result.UpstreamResponseModel),
 		ServiceTier:              result.ServiceTier,
+		UpstreamServiceTier:      optionalTrimmedStringPtr(result.UpstreamResponseServiceTier),
 		ReasoningEffort:          result.ReasoningEffort,
 		RequestedReasoningEffort: coalesceRequestedReasoningEffort(result.RequestedReasoningEffort, result.ReasoningEffort),
 		InboundEndpoint:          optionalTrimmedStringPtr(input.InboundEndpoint),
@@ -412,6 +413,20 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		ImageSizeSource:          optionalTrimmedStringPtr(result.ImageSizeSource),
 		ImageSizeBreakdown:       imageSizeBreakdown,
 		NativeCompactionV2:       input.NativeCompactionV2,
+	}
+	if result.ServiceTier != nil {
+		outboundTier := strings.TrimSpace(*result.ServiceTier)
+		echoTier := strings.TrimSpace(result.UpstreamResponseServiceTier)
+		if outboundTier != "" && echoTier != "" && !strings.EqualFold(echoTier, outboundTier) {
+			logger.L().Info("openai_service_tier_echo_mismatch",
+				zap.String("request_id", requestID),
+				zap.Int64("account_id", account.ID),
+				zap.String("account_type", string(account.Type)),
+				zap.String("model", result.Model),
+				zap.String("outbound_service_tier", outboundTier),
+				zap.String("upstream_service_tier", echoTier),
+			)
+		}
 	}
 	isVideoUsage := isGrokVideoUsageResult(result, billingModels)
 	if isVideoUsage {
