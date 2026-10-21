@@ -617,6 +617,8 @@ type UsageLog struct {
 	InboundEndpoint *string `json:"inbound_endpoint,omitempty"`
 	// UpstreamEndpoint is the normalized upstream endpoint path, e.g. /v1/responses.
 	UpstreamEndpoint *string `json:"upstream_endpoint,omitempty"`
+	// UpstreamServiceTier is the tier echoed by the upstream response.
+	UpstreamServiceTier *string `json:"upstream_service_tier,omitempty"`
 
 	GroupID        *int64 `json:"group_id"`
 	SubscriptionID *int64 `json:"subscription_id"`
@@ -697,8 +699,6 @@ type AdminUsageLog struct {
 	UpstreamResponseModel *string `json:"upstream_response_model,omitempty"`
 	// UpstreamModelMismatch is nil when the upstream did not declare a model.
 	UpstreamModelMismatch *bool `json:"upstream_model_mismatch,omitempty"`
-	// UpstreamServiceTier is the tier echoed by the upstream response.
-	UpstreamServiceTier *string `json:"upstream_service_tier,omitempty"`
 
 	// ChannelID 渠道 ID
 	ChannelID *int64 `json:"channel_id,omitempty"`
