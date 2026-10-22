@@ -41,6 +41,42 @@ func TestAnthropicToResponses_BasicText(t *testing.T) {
 	assert.Equal(t, "Hello", parts[0].Text)
 }
 
+func TestAnthropicToResponses_Speed(t *testing.T) {
+	tests := []struct {
+		name      string
+		speedJSON string
+		wantTier  string
+	}{
+		{name: "fast", speedJSON: `,"speed":"fast"`, wantTier: "priority"},
+		{name: "standard", speedJSON: `,"speed":"standard"`},
+		{name: "omitted"},
+		{name: "empty", speedJSON: `,"speed":""`},
+		{name: "null", speedJSON: `,"speed":null`},
+		{name: "unknown", speedJSON: `,"speed":"unknown"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := `{"model":"gpt-6.1-sol","max_tokens":1024,"messages":[{"role":"user","content":"hello"}]` + tt.speedJSON + `}`
+			var req AnthropicRequest
+			require.NoError(t, json.Unmarshal([]byte(body), &req))
+
+			resp, err := AnthropicToResponses(&req)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantTier, resp.ServiceTier)
+			encoded, err := json.Marshal(resp)
+			require.NoError(t, err)
+			var fields map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(encoded, &fields))
+			assert.NotContains(t, fields, "speed")
+			if tt.wantTier == "" {
+				assert.NotContains(t, fields, "service_tier")
+			} else {
+				assert.JSONEq(t, `"priority"`, string(fields["service_tier"]))
+			}
+		})
+	}
+}
+
 func TestAnthropicToResponses_SystemPrompt(t *testing.T) {
 	t.Run("string", func(t *testing.T) {
 		req := &AnthropicRequest{

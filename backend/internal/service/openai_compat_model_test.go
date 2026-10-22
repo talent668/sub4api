@@ -18,6 +18,8 @@ import (
 
 	"github.com/MACOS-DO/sub4api/internal/config"
 	"github.com/MACOS-DO/sub4api/internal/pkg/apicompat"
+	"github.com/MACOS-DO/sub4api/internal/pkg/claude"
+	"github.com/MACOS-DO/sub4api/internal/pkg/ctxkey"
 	"github.com/MACOS-DO/sub4api/internal/pkg/openai"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -1143,6 +1145,93 @@ func TestForwardAsAnthropic_ReusesOAuthCodexTurnState(t *testing.T) {
 	requireOpenAIMessagesCodexIdentity(t, upstream.requests[1], codexCLIUserAgent, openai.CodexDefaultOriginator)
 	require.False(t, gjson.GetBytes(upstream.bodies[1], "prompt_cache_key").Exists())
 	require.False(t, gjson.GetBytes(upstream.bodies[1], "previous_response_id").Exists())
+}
+
+func TestForwardAsAnthropic_SpeedServiceTier(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tests := []struct {
+		name       string
+		speedJSON  string
+		beta       string
+		forcedTier string
+		filter     bool
+		stream     bool
+		wantTier   string
+	}{
+		{name: "speed fast", speedJSON: `,"speed":"fast"`, wantTier: "priority"},
+		{name: "speed fast streaming", speedJSON: `,"speed":"fast"`, stream: true, wantTier: "priority"},
+		{name: "legacy beta", beta: claude.BetaFastMode, wantTier: "priority"},
+		{name: "fast with beta", speedJSON: `,"speed":"fast"`, beta: claude.BetaFastMode, wantTier: "priority"},
+		{name: "standard with beta", speedJSON: `,"speed":"standard"`, beta: claude.BetaFastMode},
+		{name: "standard", speedJSON: `,"speed":"standard"`},
+		{name: "no speed or beta"},
+		{name: "empty with beta", speedJSON: `,"speed":""`, beta: claude.BetaFastMode, wantTier: "priority"},
+		{name: "null with beta", speedJSON: `,"speed":null`, beta: claude.BetaFastMode, wantTier: "priority"},
+		{name: "unknown with beta", speedJSON: `,"speed":"unknown"`, beta: claude.BetaFastMode},
+		{name: "group forces standard", speedJSON: `,"speed":"fast"`, forcedTier: "default", wantTier: "default"},
+		{name: "group forces fast", speedJSON: `,"speed":"standard"`, forcedTier: "priority", wantTier: "priority"},
+		{name: "global filters fast", speedJSON: `,"speed":"fast"`, filter: true},
+		{name: "global filters group fast", speedJSON: `,"speed":"standard"`, forcedTier: "priority", filter: true},
+	}
+	for _, accountType := range []string{AccountTypeOAuth, AccountTypeAPIKey} {
+		t.Run(accountType, func(t *testing.T) {
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					body := []byte(fmt.Sprintf(`{"model":"claude-opus-5-5","max_tokens":1024,"messages":[{"role":"user","content":"hello"}],"stream":%t%s}`, tt.stream, tt.speedJSON))
+					c, _ := gin.CreateTestContext(httptest.NewRecorder())
+					c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+					c.Request.Header.Set("Content-Type", "application/json")
+					if tt.beta != "" {
+						c.Request.Header.Set("anthropic-beta", tt.beta)
+					}
+
+					settings := DefaultOpenAIFastPolicySettings()
+					if tt.filter {
+						settings = openAIFastFilterPriorityPolicy()
+					}
+					svc := newOpenAIGatewayServiceWithSettings(t, settings)
+					upstream := &httpUpstreamRecorder{resp: openAICompatSSECompletedResponse("resp_speed", "gpt-6.1-sol")}
+					svc.httpUpstream = upstream
+					svc.cfg = &config.Config{Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false}}}
+					account := &Account{
+						ID: 1, Name: "openai-test", Platform: PlatformOpenAI, Type: accountType, Concurrency: 1,
+						Credentials: map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-acc"},
+					}
+					if accountType == AccountTypeAPIKey {
+						account.Credentials = map[string]any{"api_key": "sk-test", "base_url": "https://api.openai.com/v1"}
+					}
+					ctx := context.Background()
+					if tt.forcedTier != "" {
+						ctx = context.WithValue(ctx, ctxkey.Group, &Group{
+							ID: 7, Platform: PlatformComposite, Status: StatusActive, Hydrated: true, ForcedServiceTier: tt.forcedTier,
+						})
+					}
+
+					result, err := svc.ForwardAsAnthropic(ctx, c, account, body, "", "gpt-6.1-sol")
+					require.NoError(t, err)
+					require.NotNil(t, result)
+					require.NotNil(t, upstream.lastReq)
+					require.Equal(t, "gpt-6.1-sol", gjson.GetBytes(upstream.lastBody, "model").String())
+					require.False(t, gjson.GetBytes(upstream.lastBody, "speed").Exists())
+					tier := gjson.GetBytes(upstream.lastBody, "service_tier")
+					require.Equal(t, tt.wantTier, tier.String())
+					require.Equal(t, tt.wantTier != "", tier.Exists())
+					require.Equal(t, tt.wantTier, optionalStringValue(result.ServiceTier))
+					if accountType == AccountTypeOAuth {
+						wantHint := "model=gpt-6.1-sol"
+						if tt.wantTier == "priority" {
+							wantHint += ";tier=priority"
+						}
+						require.Equal(t, wantHint, upstream.lastReq.Header.Get(openAICodexRoutingHintHeader))
+						requireOpenAIMessagesCodexIdentity(t, upstream.lastReq, codexCLIUserAgent, openai.CodexDefaultOriginator)
+					} else {
+						require.Empty(t, upstream.lastReq.Header.Get(openAICodexRoutingHintHeader))
+					}
+				})
+			}
+		})
+	}
 }
 
 func TestForwardAsAnthropic_OAuthRestoresCodexIdentityHeaders(t *testing.T) {

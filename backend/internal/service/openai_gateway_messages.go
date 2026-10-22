@@ -164,8 +164,9 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	responsesReq.Stream = true
 	isStream := true
 
-	// 3b. Handle BetaFastMode → service_tier: "priority"
-	if containsBetaToken(c.GetHeader("anthropic-beta"), claude.BetaFastMode) {
+	// 3b. Keep the legacy Fast beta fallback only when body speed is unspecified.
+	// Explicit speed takes precedence; speed=fast is mapped by the converter.
+	if anthropicReq.Speed == "" && containsBetaToken(c.GetHeader("anthropic-beta"), claude.BetaFastMode) {
 		responsesReq.ServiceTier = "priority"
 	}
 
