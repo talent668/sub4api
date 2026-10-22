@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { formatUsageServiceTier, getUsageServiceTierLabel, normalizeUsageServiceTier } from '@/utils/usageServiceTier'
+import { formatUsageServiceTier, getUsageFastChannel, getUsageFastChannelLabel, getUsageServiceTierLabel, normalizeUsageServiceTier } from '@/utils/usageServiceTier'
 
 describe('usageServiceTier utils', () => {
   it('normalizes fast/default aliases', () => {
@@ -38,5 +38,25 @@ describe('usageServiceTier utils', () => {
     expect(getUsageServiceTierLabel('flex', translate)).toBe('Flex')
     expect(getUsageServiceTierLabel(undefined, translate)).toBe('Standard')
     expect(getUsageServiceTierLabel('custom-tier', translate)).toBe('custom-tier')
+  })
+
+  it('treats WS and HTTP fast requests differently', () => {
+    expect(getUsageFastChannel('priority', true)).toBe('ws')
+    expect(getUsageFastChannel('fast', true)).toBe('ws')
+    expect(getUsageFastChannel('ultrafast', true)).toBe('ws')
+    expect(getUsageFastChannel('priority', false)).toBe('http')
+    expect(getUsageFastChannel('standard', true)).toBe('none')
+    expect(getUsageFastChannel(undefined, true)).toBe('none')
+  })
+
+  it('maps fast channels to translated labels', () => {
+    const translate = (key: string) => ({
+      'usage.fastChannelWS': 'WS (Fast path)',
+      'usage.fastChannelHTTP': 'HTTP (may not apply to ChatGPT accounts)',
+    })[key] ?? key
+
+    expect(getUsageFastChannelLabel('ws', translate)).toBe('WS (Fast path)')
+    expect(getUsageFastChannelLabel('http', translate)).toBe('HTTP (may not apply to ChatGPT accounts)')
+    expect(getUsageFastChannelLabel('none', translate)).toBe('')
   })
 })

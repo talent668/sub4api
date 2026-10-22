@@ -504,6 +504,21 @@
             <span v-else class="font-medium text-gray-500">{{ t('usage.upstreamServiceTierUnknown') }}</span>
           </div>
           <div class="flex items-center justify-between gap-6">
+            <span class="text-gray-400">{{ t('usage.transport') }}</span>
+            <span class="font-semibold" :class="tooltipData?.openai_ws_mode ? 'text-emerald-400' : 'text-gray-300'">
+              {{ tooltipData?.openai_ws_mode ? t('usage.transportWS') : t('usage.transportHTTP') }}
+            </span>
+          </div>
+          <div v-if="fastChannel !== 'none'" class="flex items-center justify-between gap-6">
+            <span class="text-gray-400">{{ t('usage.fastChannel') }}</span>
+            <span class="font-semibold" :class="fastChannel === 'ws' ? 'text-emerald-400' : 'text-amber-400'">
+              {{ getUsageFastChannelLabel(fastChannel, t) }}
+            </span>
+          </div>
+          <div v-if="fastChannel !== 'none'" class="text-[10px] leading-relaxed text-gray-500">
+            {{ t('usage.fastChannelHint') }}
+          </div>
+          <div class="flex items-center justify-between gap-6">
             <span class="text-gray-400">{{ t('usage.rate') }}</span>
             <span class="font-semibold text-blue-400">{{ formatMultiplier(tooltipData?.rate_multiplier ?? 1) }}x</span>
           </div>
@@ -546,7 +561,7 @@ import { useAppStore } from '@/stores/app'
 import { formatDateTime, formatReasoningEffort, reasoningEffortValuesEqual } from '@/utils/format'
 import { formatCacheTokens, formatMultiplier } from '@/utils/formatters'
 import { formatTokenPricePerMillion } from '@/utils/usagePricing'
-import { getUsageServiceTierLabel } from '@/utils/usageServiceTier'
+import { getUsageFastChannel, getUsageFastChannelLabel, getUsageServiceTierLabel } from '@/utils/usageServiceTier'
 import { resolveUsageRequestType } from '@/utils/usageRequestType'
 import {
   LATENCY_BAR_CLASSES,
@@ -701,6 +716,9 @@ const copyUpstreamRequestId = (upstreamRequestId: string) =>
 const tooltipVisible = ref(false)
 const tooltipPosition = ref({ x: 0, y: 0 })
 const tooltipData = ref<AdminUsageLog | null>(null)
+// Fast/Ultra Fast only reaches the priority scheduler over the upstream WS path;
+// show that transport explicitly instead of relying on the uninformative echo.
+const fastChannel = computed(() => getUsageFastChannel(tooltipData.value?.service_tier, tooltipData.value?.openai_ws_mode))
 
 // Tooltip state - token
 const tokenTooltipVisible = ref(false)

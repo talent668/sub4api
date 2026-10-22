@@ -113,8 +113,16 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		}
 	}
 	wsDecision := s.getOpenAIWSProtocolResolver().Resolve(account)
-	// 仅允许 WS 入站请求走 WS 上游，避免出现 HTTP -> WS 协议混用。
-	wsDecision = resolveOpenAIWSDecisionByClientTransport(wsDecision, GetOpenAIClientTransport(c))
+	fastWSBridge := false
+	if bridged, bridgedOK := s.resolveOpenAIFastWSBridgeDecision(ctx, c, account, body, wsDecision); bridgedOK {
+		// Fast/Ultra Fast 只能经上游 Responses WS 被 ChatGPT Codex 后端调度；
+		// HTTP 入站的 fast 请求改走 WS 上游，否则 priority 会被静默降级。
+		wsDecision = bridged
+		fastWSBridge = true
+	} else {
+		// 仅允许 WS 入站请求走 WS 上游，避免出现 HTTP -> WS 协议混用。
+		wsDecision = resolveOpenAIWSDecisionByClientTransport(wsDecision, GetOpenAIClientTransport(c))
+	}
 	passthroughEnabled := account.IsOpenAIPassthroughEnabled()
 	compactPath := isOpenAIResponsesCompactPath(c)
 	if shouldFlattenOpenAIResponsesNamespaces(account, wsDecision.Transport, passthroughEnabled, compactPath) {
@@ -258,7 +266,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		}
 		return nil, errors.New("openai ws v1 is temporarily unsupported; use ws v2")
 	}
-	if passthroughEnabled {
+	if passthroughEnabled && !fastWSBridge {
 		attemptImageIntentInvalidated := false
 		if isCodexCLI && codexImageGenerationExplicitToolPolicy == codexImageGenerationExplicitToolPolicyStrip {
 			strippedBody, changed, stripErr := stripOpenAIImageGenerationToolsFromRawPayload(body)
@@ -804,6 +812,11 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			hasPreviousResponseID,
 		)
 		maxAttempts := openAIWSReconnectRetryLimit + 1
+		if fastWSBridge {
+			// HTTP 入站的 fast 桥接有 HTTP 兜底，重连预算收紧为一次重试，
+			// 避免 WS 不可用时先等完整退避再降级到 standard。
+			maxAttempts = 2
+		}
 		wsAttempts := 0
 		var wsResult *OpenAIForwardResult
 		var wsErr error
@@ -1018,8 +1031,22 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			}
 			return wsResult, nil
 		}
-		s.writeOpenAIWSFallbackErrorResponse(c, account, wsErr)
-		return nil, wsErr
+		if fastWSBridge && c != nil && c.Writer != nil && !c.Writer.Written() {
+			// Fast 桥接只是尽力而为：上游 WS 在写任何下游字节前失败时回退 HTTP，
+			// 保证请求仍然完成（代价是本次按 standard 调度）。
+			reason, _ := classifyOpenAIWSReconnectReason(wsErr)
+			logOpenAIWSModeInfo(
+				"fast_bridge_fallback_http account_id=%d reason=%s",
+				account.ID,
+				normalizeOpenAIWSLogValue(reason),
+			)
+			c.Set("openai_ws_transport_decision", string(OpenAIUpstreamTransportHTTPSSE))
+			c.Set("openai_ws_transport_reason", "fast_bridge_fallback_http")
+			wsDecision = openAIWSHTTPDecision("fast_bridge_fallback_http")
+		} else {
+			s.writeOpenAIWSFallbackErrorResponse(c, account, wsErr)
+			return nil, wsErr
+		}
 	}
 
 	reasoningEffort := extractOpenAIReasoningEffortFromBody(body, upstreamModel, billingModel, originalModel)
