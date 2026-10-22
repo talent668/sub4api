@@ -115,11 +115,10 @@ func (s *OpenAIGatewayService) openAIFastBridgeEnabled(ctx context.Context) bool
 // tier may ignore an account-level WS opt-out. Global hard switches and an
 // explicit per-account force_http are always respected.
 func (s *OpenAIGatewayService) openAIFastBridgeMayOverrideAccountSwitch(account *Account, reason string) bool {
-	if s == nil || s.cfg == nil || account == nil {
+	if s == nil || account == nil {
 		return false
 	}
-	wsCfg := s.cfg.Gateway.OpenAIWS
-	if wsCfg.ForceHTTP || !wsCfg.Enabled || !wsCfg.OAuthEnabled || !wsCfg.ResponsesWebsocketsV2 {
+	if !s.openAIFastWSBridgeServerAvailable() {
 		return false
 	}
 	if account.Concurrency <= 0 {

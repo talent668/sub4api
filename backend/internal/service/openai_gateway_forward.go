@@ -937,6 +937,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 				&agentTaskRecoveryTried,
 				wsFirstOutputTimeout,
 				reasoningEffortValue,
+				nil,
 			)
 			if wsErr == nil {
 				break

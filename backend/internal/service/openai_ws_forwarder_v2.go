@@ -36,6 +36,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	agentTaskRecoveryTried *bool,
 	firstOutputTimeout time.Duration,
 	reasoningEffort string,
+	sink *openAIWSDownstreamSink,
 ) (*OpenAIForwardResult, error) {
 	if s == nil || account == nil {
 		return nil, wrapOpenAIWSFallback("invalid_state", errors.New("service or account is nil"))
@@ -269,6 +270,11 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		}
 		lease.Release()
 	}()
+	if sink != nil {
+		// 非 /v1/responses 下游（目前是 Anthropic Messages 兼容桥）需要握手头里的
+		// x-request-id / x-codex-turn-state 才能复用现有转换与续链逻辑。
+		sink.SetHandshakeHeaders(lease.HandshakeHeaders())
+	}
 	connID := strings.TrimSpace(lease.ConnID())
 	logOpenAIWSModeDebug(
 		"connected account_id=%d account_type=%s transport=%s conn_id=%s conn_reused=%v conn_idle_ms=%d conn_age_ms=%d upstream_pings=%d conn_pick_ms=%d queue_wait_ms=%d has_previous_response_id=%v",
@@ -327,7 +333,11 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 			stateStore.BindSessionTurnState(groupID, sessionHash, handshakeTurnState, s.openAIWSSessionStickyTTL())
 		}
 		if c != nil {
-			c.Header(http.CanonicalHeaderKey(openAIWSTurnStateHeader), handshakeTurnState)
+			if sink != nil {
+				sink.SetHeader(http.CanonicalHeaderKey(openAIWSTurnStateHeader), handshakeTurnState)
+			} else {
+				c.Header(http.CanonicalHeaderKey(openAIWSTurnStateHeader), handshakeTurnState)
+			}
 		}
 	}
 
@@ -458,19 +468,24 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 
 	var flusher http.Flusher
 	if reqStream {
-		if s.responseHeaderFilter != nil {
-			responseheaders.WriteFilteredHeaders(c.Writer.Header(), http.Header{}, s.responseHeaderFilter)
+		if sink != nil {
+			// 下游由 sink 接管（管道 / 内存收集），SSE 响应头由下游转换器自行写出。
+			flusher = sink
+		} else {
+			if s.responseHeaderFilter != nil {
+				responseheaders.WriteFilteredHeaders(c.Writer.Header(), http.Header{}, s.responseHeaderFilter)
+			}
+			c.Header("Content-Type", "text/event-stream")
+			c.Header("Cache-Control", "no-cache")
+			c.Header("Connection", "keep-alive")
+			c.Header("X-Accel-Buffering", "no")
+			f, ok := c.Writer.(http.Flusher)
+			if !ok {
+				lease.MarkBroken()
+				return nil, wrapOpenAIWSFallback("streaming_not_supported", errors.New("streaming not supported"))
+			}
+			flusher = f
 		}
-		c.Header("Content-Type", "text/event-stream")
-		c.Header("Cache-Control", "no-cache")
-		c.Header("Connection", "keep-alive")
-		c.Header("X-Accel-Buffering", "no")
-		f, ok := c.Writer.(http.Flusher)
-		if !ok {
-			lease.MarkBroken()
-			return nil, wrapOpenAIWSFallback("streaming_not_supported", errors.New("streaming not supported"))
-		}
-		flusher = f
 	}
 
 	flushBatchSize := s.openAIWSEventFlushBatchSize()
@@ -498,7 +513,12 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		frame = append(frame, "data: "...)
 		frame = append(frame, message...)
 		frame = append(frame, '\n', '\n')
-		_, wErr := c.Writer.Write(frame)
+		var wErr error
+		if sink != nil {
+			wErr = sink.WriteFrame(frame)
+		} else {
+			_, wErr = c.Writer.Write(frame)
+		}
 		if wErr == nil {
 			wroteDownstream = true
 			pendingFlushEvents++
@@ -761,7 +781,7 @@ readLoop:
 				emitStreamMessage(message, true)
 			}
 			if !reqStream {
-				c.JSON(statusCode, gin.H{
+				writeWSJSONDownstream(c, sink, statusCode, gin.H{
 					"error": gin.H{
 						"type":    "upstream_error",
 						"message": errMsg,
@@ -846,7 +866,11 @@ readLoop:
 			responseID = strings.TrimSpace(gjson.GetBytes(finalResponse, "id").String())
 		}
 
-		c.Data(http.StatusOK, "application/json", finalResponse)
+		if sink != nil {
+			sink.WriteJSON(http.StatusOK, "application/json", finalResponse)
+		} else {
+			c.Data(http.StatusOK, "application/json", finalResponse)
+		}
 	} else {
 		flushStreamWriter(true)
 	}

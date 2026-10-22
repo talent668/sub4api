@@ -15,6 +15,7 @@ import (
 	"github.com/MACOS-DO/sub4api/internal/pkg/apicompat"
 	"github.com/MACOS-DO/sub4api/internal/pkg/claude"
 	"github.com/MACOS-DO/sub4api/internal/pkg/logger"
+	"github.com/MACOS-DO/sub4api/internal/pkg/openai"
 	"github.com/MACOS-DO/sub4api/internal/util/responseheaders"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
@@ -352,6 +353,63 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	token, _, err := s.getRequestCredential(ctx, c, account)
 	if err != nil {
 		return nil, fmt.Errorf("get access token: %w", err)
+	}
+
+	// 5b. Fast / Ultra Fast 只有在 ChatGPT Codex 的 Responses WS 传输上才会被
+	// 真正调度；Messages 兼容桥默认走 HTTP，会把 priority 静默降级成 standard。
+	// 这里把 fast 请求桥接到上游 WSv2；WS 在任何下游字节写出前失败时回退到下面
+	// 的 HTTP 路径（本次按 standard 调度，请求仍然完成）。
+	if bridgeDecision, bridgeOK := s.resolveAnthropicMessagesWSBridge(ctx, account, upstreamModel, responsesBody); bridgeOK {
+		var bridgeReqBody map[string]any
+		if decodeErr := decodeOpenAIJSONUseNumber(responsesBody, &bridgeReqBody); decodeErr == nil && bridgeReqBody != nil {
+			bridgeReasoningEffort := ""
+			if responsesReq.Reasoning != nil {
+				bridgeReasoningEffort = strings.TrimSpace(responsesReq.Reasoning.Effort)
+			}
+			bridgeFirstOutputTimeout := time.Duration(0)
+			if clientStream && account.Platform == PlatformOpenAI {
+				bridgeFirstOutputTimeout = s.openAIFirstOutputTimeout(bridgeReasoningEffort)
+			}
+			bridgeIsCodexCLI := openai.IsCodexOfficialClientByHeaders(c.GetHeader("User-Agent"), c.GetHeader("originator")) ||
+				(s.cfg != nil && s.cfg.Gateway.ForceCodexCLI)
+			restoreTurnState := injectCompatTurnStateForWSBridge(c, compatTurnState)
+			bridgeResult, bridgeErr, bridgeHandled := s.forwardAnthropicMessagesViaFastWS(
+				ctx,
+				c,
+				account,
+				token,
+				bridgeReqBody,
+				promptCacheKey,
+				bridgeDecision,
+				bridgeIsCodexCLI,
+				clientStream,
+				originalModel,
+				billingModel,
+				upstreamModel,
+				startTime,
+				bridgeReasoningEffort,
+				bridgeFirstOutputTimeout,
+			)
+			restoreTurnState()
+			if bridgeHandled {
+				if bridgeResult != nil {
+					s.finalizeAnthropicMessagesWSResult(
+						ctx,
+						c,
+						account,
+						bridgeResult,
+						responsesBody,
+						promptCacheKey,
+						anthropicDigestChain,
+						anthropicMatchedDigestChain,
+						apiKeyID,
+						compatContinuationEnabled,
+						bridgeReasoningEffort,
+					)
+				}
+				return bridgeResult, bridgeErr
+			}
+		}
 	}
 
 	// 6. Build upstream request
