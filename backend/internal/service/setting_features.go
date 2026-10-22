@@ -744,7 +744,70 @@ func (s *SettingService) SetOpenAIFastBridgeSettings(ctx context.Context, settin
 	if err != nil {
 		return fmt.Errorf("marshal openai fast bridge settings: %w", err)
 	}
-	return s.settingRepo.Set(ctx, SettingKeyOpenAIFastBridgeSettings, string(data))
+	if err := s.settingRepo.Set(ctx, SettingKeyOpenAIFastBridgeSettings, string(data)); err != nil {
+		return err
+	}
+	// 保存后立即刷新进程内缓存，当前节点下一个请求即生效（多节点最迟一个 TTL 内生效）。
+	s.storeOpenAIFastBridgeEnabledCache(settings.Enabled, openAIFastBridgeEnabledCacheTTL)
+	return nil
+}
+
+const (
+	openAIFastBridgeEnabledCacheTTL  = 15 * time.Second
+	openAIFastBridgeEnabledErrorTTL  = 5 * time.Second
+	openAIFastBridgeEnabledDBTimeout = 5 * time.Second
+)
+
+// cachedOpenAIFastBridgeEnabled 进程内缓存条目（短 TTL）。
+type cachedOpenAIFastBridgeEnabled struct {
+	enabled   bool
+	expiresAt int64 // unix nano
+}
+
+// IsOpenAIFastBridgeEnabledCached 返回 HTTP fast -> WS 桥接开关（进程内缓存，短 TTL）。
+// 网关转发热路径调用，不能每个请求都访问 DB；读取失败时按「关闭」处理，并以短 TTL 重试。
+func (s *SettingService) IsOpenAIFastBridgeEnabledCached(ctx context.Context) bool {
+	if s == nil || s.settingRepo == nil {
+		return false
+	}
+	if cached, ok := s.openAIFastBridgeEnabledCache.Load().(*cachedOpenAIFastBridgeEnabled); ok && cached != nil {
+		if time.Now().UnixNano() < cached.expiresAt {
+			return cached.enabled
+		}
+	}
+
+	result, _, _ := s.openAIFastBridgeEnabledSF.Do("openai_fast_bridge_enabled", func() (any, error) {
+		// 二次检查，避免排队的 goroutine 重复查询
+		if cached, ok := s.openAIFastBridgeEnabledCache.Load().(*cachedOpenAIFastBridgeEnabled); ok && cached != nil {
+			if time.Now().UnixNano() < cached.expiresAt {
+				return cached.enabled, nil
+			}
+		}
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		// 独立 context：断开请求取消链，避免客户端断连污染缓存
+		dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), openAIFastBridgeEnabledDBTimeout)
+		defer cancel()
+
+		settings, err := s.GetOpenAIFastBridgeSettings(dbCtx)
+		if err != nil || settings == nil {
+			slog.Warn("failed to get openai fast bridge settings, treating bridge as disabled", "error", err)
+			s.storeOpenAIFastBridgeEnabledCache(false, openAIFastBridgeEnabledErrorTTL)
+			return false, nil
+		}
+		s.storeOpenAIFastBridgeEnabledCache(settings.Enabled, openAIFastBridgeEnabledCacheTTL)
+		return settings.Enabled, nil
+	})
+	enabled, _ := result.(bool)
+	return enabled
+}
+
+func (s *SettingService) storeOpenAIFastBridgeEnabledCache(enabled bool, ttl time.Duration) {
+	s.openAIFastBridgeEnabledCache.Store(&cachedOpenAIFastBridgeEnabled{
+		enabled:   enabled,
+		expiresAt: time.Now().Add(ttl).UnixNano(),
+	})
 }
 
 // GetRateLimit429CooldownSettings 获取429默认回避配置

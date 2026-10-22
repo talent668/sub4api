@@ -49,9 +49,10 @@ func (s *OpenAIGatewayService) resolveOpenAIFastWSBridgeDecision(
 	if !account.UsesOpenAICodexProtocol() {
 		return baseDecision, false
 	}
-	if !s.openAIFastBridgeEnabled(ctx) {
-		// Opt-in: keep the pre-existing HTTP forwarding unless the operator
-		// enables the web switch (or the YAML/env fallback).
+	// Passthrough accounts keep their passthrough HTTP contract (instructions
+	// gate, no Codex transform, namespace restore on the way back); the shared
+	// WS branch would silently change those semantics.
+	if account.IsOpenAIPassthroughEnabled() {
 		return baseDecision, false
 	}
 	if isOpenAIResponsesCompactPath(c) {
@@ -65,9 +66,16 @@ func (s *OpenAIGatewayService) resolveOpenAIFastWSBridgeDecision(
 	if model == "" {
 		return baseDecision, false
 	}
-	mappedModel := account.GetMappedModel(model)
+	if !s.openAIFastBridgeEnabled(ctx) {
+		// Opt-in: keep the pre-existing HTTP forwarding unless the operator
+		// enables the web switch.
+		return baseDecision, false
+	}
+	// Evaluate the tier against the same upstream model Forward patches into
+	// the body (account mapping + Codex normalization), not the raw mapping.
+	_, upstreamModel := resolveOpenAIForwardMappedModels(account, model, false)
 
-	tier := s.effectiveOpenAIServiceTierForTransport(ctx, account, mappedModel, body)
+	tier := s.effectiveOpenAIServiceTierForTransport(ctx, account, upstreamModel, body)
 	if !fastTierRequiresWSUpstream(tier) {
 		return baseDecision, false
 	}
@@ -83,7 +91,7 @@ func (s *OpenAIGatewayService) resolveOpenAIFastWSBridgeDecision(
 	// Honor it even when the account-level WS switch is off, as long as global
 	// WS is usable; if the upstream WS dial fails, Forward falls back to HTTP so
 	// the request still completes (at standard tier) instead of failing.
-	if openAIGroupForcedServiceTier(ctx, account, mappedModel) != "" &&
+	if openAIGroupForcedServiceTier(ctx, account, upstreamModel) != "" &&
 		s.openAIFastBridgeMayOverrideAccountSwitch(account, baseDecision.Reason) {
 		return OpenAIWSProtocolDecision{
 			Transport: OpenAIUpstreamTransportResponsesWebsocketV2,
@@ -95,12 +103,12 @@ func (s *OpenAIGatewayService) resolveOpenAIFastWSBridgeDecision(
 
 // openAIFastBridgeEnabled resolves the web-only opt-in switch. It has no
 // config/env fallback: the Admin Settings toggle is the single source of truth.
+// The value is served from the setting service's in-process cache.
 func (s *OpenAIGatewayService) openAIFastBridgeEnabled(ctx context.Context) bool {
 	if s == nil || s.settingService == nil {
 		return false
 	}
-	settings, err := s.settingService.GetOpenAIFastBridgeSettings(ctx)
-	return err == nil && settings != nil && settings.Enabled
+	return s.settingService.IsOpenAIFastBridgeEnabledCached(ctx)
 }
 
 // openAIFastBridgeMayOverrideAccountSwitch reports whether a group-forced fast
@@ -125,35 +133,39 @@ func (s *OpenAIGatewayService) openAIFastBridgeMayOverrideAccountSwitch(account 
 	}
 }
 
-// effectiveOpenAIServiceTierForTransport resolves the tier that Forward will
-// send upstream, mirroring the later body patch order without mutating the
-// body: group force first, then the client value, then the global policy, then
-// the missing-tier force switch.
+// effectiveOpenAIServiceTierForTransport resolves the tier that Forward's shared
+// (non-passthrough) branch will send upstream, mirroring its patch order without
+// mutating the body: a group-forced tier replaces the client value and goes
+// through the global policy; a missing tier is only upgraded by the missing-tier
+// force switch and that injected priority is final (Forward does not evaluate
+// it again); an unrecognized client tier is left untouched.
 func (s *OpenAIGatewayService) effectiveOpenAIServiceTierForTransport(
 	ctx context.Context,
 	account *Account,
 	model string,
 	body []byte,
 ) string {
-	tier := openAIGroupForcedServiceTier(ctx, account, model)
-	if tier == "" {
-		tier = normalizedOpenAIServiceTierValue(gjson.GetBytes(body, "service_tier").String())
+	rawTier := openAIGroupForcedServiceTier(ctx, account, model)
+	if rawTier == "" {
+		rawTier = strings.TrimSpace(gjson.GetBytes(body, "service_tier").String())
 	}
-	if tier == "" {
+	if rawTier == "" {
 		if s.shouldForceOpenAIFastPriorityForMissingTier(ctx, account, model) {
-			tier = OpenAIFastTierPriority
+			return OpenAIFastTierPriority
 		}
-	}
-	if tier == "" {
 		return ""
 	}
-	action, _ := s.evaluateOpenAIFastPolicy(ctx, account, model, tier)
+	normTier := normalizedOpenAIServiceTierValue(rawTier)
+	if normTier == "" {
+		return ""
+	}
+	action, _ := s.evaluateOpenAIFastPolicy(ctx, account, model, normTier)
 	switch action {
 	case BetaPolicyActionFilter:
 		return ""
 	case OpenAIFastPolicyActionForcePriority:
 		return OpenAIFastTierPriority
 	default:
-		return normalizedOpenAIServiceTierValue(tier)
+		return normTier
 	}
 }

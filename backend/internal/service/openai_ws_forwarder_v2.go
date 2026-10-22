@@ -34,6 +34,8 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	attempt int,
 	lastFailureReason string,
 	agentTaskRecoveryTried *bool,
+	firstOutputTimeout time.Duration,
+	reasoningEffort string,
 ) (*OpenAIForwardResult, error) {
 	if s == nil || account == nil {
 		return nil, wrapOpenAIWSFallback("invalid_state", errors.New("service or account is nil"))
@@ -388,6 +390,21 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	clientDisconnected := false
 	clientDisconnectDrainStartedAt := time.Time{}
 	readTimeout := s.openAIWSReadTimeout()
+	// firstOutputTimeout > 0 时（仅 HTTP 入站的 fast 桥接请求），首个语义输出
+	// 必须在 startTime+timeout 前到达，与 HTTP 路径的首字超时同一基准。
+	firstOutputDeadline := time.Time{}
+	if firstOutputTimeout > 0 {
+		firstOutputDeadline = startTime.Add(firstOutputTimeout)
+	}
+	newFirstOutputTimeoutError := func() error {
+		lease.MarkBroken()
+		wsProxyID, wsProxyName := opsUpstreamWSProxyAttribution(account)
+		return s.newOpenAIFirstOutputTimeoutError(
+			ctx, c, account, wsProxyID, wsProxyName,
+			startTime, originalModel, reasoningEffort,
+			firstOutputTimeout, "websocket_first_semantic_output", lease.HandshakeHeaders(),
+		)
+	}
 	upstreamReadCtx := ctx
 	upstreamReadDetached := false
 	clientRequestCanceled := func() bool {
@@ -525,11 +542,22 @@ readLoop:
 		var message []byte
 		var readErr error
 		readUsedDetachedContext := upstreamReadDetached
+		readBoundByFirstOutput := false
 		if len(pendingJSONDocuments) > 0 {
 			message = pendingJSONDocuments[0]
 			pendingJSONDocuments = pendingJSONDocuments[1:]
 		} else {
 			currentReadTimeout := readTimeout
+			if !firstOutputDeadline.IsZero() && firstTokenMs == nil && !wroteDownstream && !clientDisconnected {
+				remaining := time.Until(firstOutputDeadline)
+				if remaining <= 0 {
+					return nil, newFirstOutputTimeoutError()
+				}
+				if currentReadTimeout <= 0 || remaining < currentReadTimeout {
+					currentReadTimeout = remaining
+					readBoundByFirstOutput = true
+				}
+			}
 			if clientDisconnected && !clientDisconnectDrainStartedAt.IsZero() {
 				remaining := readTimeout - time.Since(clientDisconnectDrainStartedAt)
 				if remaining <= 0 {
@@ -594,6 +622,9 @@ readLoop:
 				truncateOpenAIWSLogValue(firstEventType, openAIWSLogValueMaxLen),
 				truncateOpenAIWSLogValue(lastEventType, openAIWSLogValueMaxLen),
 			)
+			if readBoundByFirstOutput && !wroteDownstream && !time.Now().Before(firstOutputDeadline) && !clientRequestCanceled() {
+				return nil, newFirstOutputTimeoutError()
+			}
 			if clientDisconnected {
 				if !readUsedDetachedContext && errors.Is(readErr, context.Canceled) && clientRequestCanceled() {
 					continue

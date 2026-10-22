@@ -266,7 +266,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		}
 		return nil, errors.New("openai ws v1 is temporarily unsupported; use ws v2")
 	}
-	if passthroughEnabled && !fastWSBridge {
+	if passthroughEnabled {
 		attemptImageIntentInvalidated := false
 		if isCodexCLI && codexImageGenerationExplicitToolPolicy == codexImageGenerationExplicitToolPolicyStrip {
 			strippedBody, changed, stripErr := stripOpenAIImageGenerationToolsFromRawPayload(body)
@@ -795,6 +795,18 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	}
 	SetOpsUpstreamModel(c, upstreamModel)
 
+	reasoningEffort := extractOpenAIReasoningEffortFromBody(body, upstreamModel, billingModel, originalModel)
+	// 国产模型默认 effort 补充：此处 reqModel 已被 mapping 重写为 billingModel。
+	reasoningEffort = ApplyThinkingEnabledFallback(reasoningEffort, body, reqModel)
+	reasoningEffortValue := ""
+	if reasoningEffort != nil {
+		reasoningEffortValue = *reasoningEffort
+	}
+	firstOutputTimeout := time.Duration(0)
+	if reqStream && account.Platform == PlatformOpenAI {
+		firstOutputTimeout = s.openAIFirstOutputTimeout(reasoningEffortValue)
+	}
+
 	// 命中 WS 时仅走 WebSocket Mode；不再自动回退 HTTP。
 	if wsDecision.Transport == OpenAIUpstreamTransportResponsesWebsocketV2 {
 		// WS 分支需要结构化 payload 与重连恢复，命中后再触发 full-map decode。
@@ -812,10 +824,14 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			hasPreviousResponseID,
 		)
 		maxAttempts := openAIWSReconnectRetryLimit + 1
+		wsFirstOutputTimeout := time.Duration(0)
 		if fastWSBridge {
 			// HTTP 入站的 fast 桥接有 HTTP 兜底，重连预算收紧为一次重试，
 			// 避免 WS 不可用时先等完整退避再降级到 standard。
 			maxAttempts = 2
+			// 桥接请求沿用 HTTP 路径的首个语义输出超时（同一 startTime 基准），
+			// 原生 WS 入站请求不受影响。
+			wsFirstOutputTimeout = firstOutputTimeout
 		}
 		wsAttempts := 0
 		var wsResult *OpenAIForwardResult
@@ -919,12 +935,20 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 				attempt,
 				wsLastFailureReason,
 				&agentTaskRecoveryTried,
+				wsFirstOutputTimeout,
+				reasoningEffortValue,
 			)
 			if wsErr == nil {
 				break
 			}
 			if c != nil && c.Writer != nil && c.Writer.Written() {
 				break
+			}
+			var wsFailoverErr *UpstreamFailoverError
+			if errors.As(wsErr, &wsFailoverErr) {
+				// 首字超时与 HTTP 路径同语义：截止时间已过，重连或回退 HTTP 都会立刻
+				// 再次超时，直接交给上层切换账号。
+				return nil, wsErr
 			}
 			var taskRecoveredErr *agentIdentityTaskRecoveredError
 			if errors.As(wsErr, &taskRecoveredErr) {
@@ -1043,22 +1067,39 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			c.Set("openai_ws_transport_decision", string(OpenAIUpstreamTransportHTTPSSE))
 			c.Set("openai_ws_transport_reason", "fast_bridge_fallback_http")
 			wsDecision = openAIWSHTTPDecision("fast_bridge_fallback_http")
+			// wsReqBody 与 reqBody 是同一个 map：WS 重试已在其上就地删除
+			// previous_response_id / 剥离失效密文，WS 层还会改写其嵌套的
+			// client_metadata，不能直接序列化。这里从进入 WS 分支前的 body 重建
+			// HTTP 请求：重放 WS 已生效的恢复，并按非 WSv2 语义去掉续链锚点。
+			_, wsKeptPreviousResponseID := wsReqBody["previous_response_id"]
+			dropPreviousResponseID := gjson.GetBytes(body, "previous_response_id").Exists() &&
+				(!account.IsOpenAIApiKey() || !wsKeptPreviousResponseID)
+			if dropPreviousResponseID || wsInvalidEncryptedContentRecoveryTried {
+				decoded, decodeErr := getOpenAIRequestBodyMap(c, body)
+				if decodeErr != nil {
+					return nil, decodeErr
+				}
+				if wsInvalidEncryptedContentRecoveryTried {
+					trimOpenAIEncryptedReasoningItems(decoded)
+				}
+				if dropPreviousResponseID {
+					delete(decoded, "previous_response_id")
+					if input, ok := decoded["input"].([]any); ok && account.UsesOpenAICodexProtocol() {
+						sanitizeOpenAIResponsesOrphanToolOutputs(decoded, input, false)
+					}
+				}
+				var marshalErr error
+				body, marshalErr = marshalOpenAIUpstreamJSON(decoded)
+				if marshalErr != nil {
+					return nil, fmt.Errorf("serialize fast bridge fallback body: %w", marshalErr)
+				}
+			}
+			requestView = newOpenAIRequestView(body)
+			reqBody = nil
 		} else {
 			s.writeOpenAIWSFallbackErrorResponse(c, account, wsErr)
 			return nil, wsErr
 		}
-	}
-
-	reasoningEffort := extractOpenAIReasoningEffortFromBody(body, upstreamModel, billingModel, originalModel)
-	// 国产模型默认 effort 补充：此处 reqModel 已被 mapping 重写为 billingModel。
-	reasoningEffort = ApplyThinkingEnabledFallback(reasoningEffort, body, reqModel)
-	reasoningEffortValue := ""
-	if reasoningEffort != nil {
-		reasoningEffortValue = *reasoningEffort
-	}
-	firstOutputTimeout := time.Duration(0)
-	if reqStream && account.Platform == PlatformOpenAI {
-		firstOutputTimeout = s.openAIFirstOutputTimeout(reasoningEffortValue)
 	}
 
 	httpInvalidEncryptedContentRetryTried := false
