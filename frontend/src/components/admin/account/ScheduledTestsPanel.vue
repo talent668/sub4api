@@ -31,6 +31,16 @@
         <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <div>
             <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400">
+              {{ t('admin.scheduledTests.testType') }}
+            </label>
+            <Select
+              v-model="newPlan.test_type"
+              :options="testTypeOptions"
+              :placeholder="t('admin.scheduledTests.testType')"
+            />
+          </div>
+          <div v-if="!isDiagnosticType(newPlan.test_type)">
+            <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400">
               {{ t('admin.scheduledTests.model') }}
             </label>
             <Select
@@ -39,6 +49,43 @@
               :placeholder="t('admin.scheduledTests.model')"
               :searchable="modelOptions.length > 5"
             />
+          </div>
+          <div v-else>
+            <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400">
+              {{ t('admin.scheduledTests.diagnosticApiKey') }}
+            </label>
+            <Select
+              v-model="newPlan.api_key_id"
+              :options="diagnosticKeyOptions"
+              :placeholder="t('admin.scheduledTests.diagnosticApiKey')"
+              :searchable="diagnosticKeyOptions.length > 5"
+            />
+            <p v-if="diagnosticOptionsError" class="mt-1 text-xs text-red-600 dark:text-red-400">{{ diagnosticOptionsError }}</p>
+            <p v-else-if="diagnosticOptionsLoading" class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('common.loading') }}...</p>
+            <p v-else-if="!diagnosticKeyOptions.length" class="mt-1 text-xs text-amber-600 dark:text-amber-400">{{ t('admin.scheduledTests.diagnosticNoKeys') }}</p>
+          </div>
+          <div v-if="isDiagnosticType(newPlan.test_type)" class="sm:col-span-2">
+            <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400">
+              {{ t('admin.scheduledTests.diagnosticModels') }}
+            </label>
+            <div class="flex flex-wrap gap-2">
+              <button
+                v-for="model in diagnosticModels"
+                :key="model"
+                type="button"
+                @click="toggleModel(newPlan.models, model)"
+                :class="[
+                  'rounded-lg border px-2.5 py-1.5 font-mono text-xs transition-colors',
+                  newPlan.models.includes(model)
+                    ? 'border-primary-400 bg-primary-50 text-primary-700 dark:border-primary-500 dark:bg-primary-900/30 dark:text-primary-300'
+                    : 'border-gray-200 bg-white text-gray-600 hover:bg-gray-50 dark:border-dark-600 dark:bg-dark-800 dark:text-gray-300 dark:hover:bg-dark-700'
+                ]"
+              >
+                {{ model }}
+              </button>
+            </div>
+            <p v-if="diagnosticOptionsLoading" class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('common.loading') }}...</p>
+            <p v-else-if="!diagnosticModels.length" class="mt-1 text-xs text-amber-600 dark:text-amber-400">{{ t('admin.scheduledTests.diagnosticNoModels') }}</p>
           </div>
           <div>
             <label class="mb-1 flex items-center gap-1 text-xs font-medium text-gray-600 dark:text-gray-400">
@@ -96,7 +143,7 @@
               {{ t('admin.scheduledTests.enabled') }}
             </label>
           </div>
-          <div class="flex items-end">
+          <div v-if="!isDiagnosticType(newPlan.test_type)" class="flex items-end">
             <div>
               <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
                 <Toggle v-model="newPlan.auto_recover" />
@@ -117,7 +164,7 @@
           </button>
           <button
             @click="handleCreate"
-            :disabled="!newPlan.model_id || !newPlan.cron_expression || creating"
+            :disabled="creating || !newPlan.cron_expression || (isDiagnosticType(newPlan.test_type) ? (!newPlan.api_key_id || newPlan.models.length === 0) : !newPlan.model_id)"
             class="flex items-center gap-1.5 rounded-lg bg-primary-500 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-primary-600 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Icon v-if="creating" name="refresh" size="sm" class="animate-spin" :stroke-width="2" />
@@ -156,10 +203,18 @@
             @click="toggleExpand(plan.id)"
           >
             <div class="flex flex-1 items-center gap-4">
-              <!-- Model -->
+              <!-- Model / Models -->
               <div class="min-w-0">
-                <div class="text-sm font-medium text-gray-900 dark:text-gray-100">
-                  {{ plan.model_id }}
+                <div class="flex items-center gap-2">
+                  <span class="text-sm font-medium text-gray-900 dark:text-gray-100">
+                    {{ planTitle(plan) }}
+                  </span>
+                  <span
+                    v-if="isDiagnosticType(plan.test_type)"
+                    class="inline-flex items-center rounded-full bg-violet-100 px-2 py-0.5 text-xs font-medium text-violet-700 dark:bg-violet-500/20 dark:text-violet-300"
+                  >
+                    {{ t('admin.scheduledTests.typeCodexDiagnostic') }}
+                  </span>
                 </div>
                 <div class="mt-0.5 font-mono text-xs text-gray-500 dark:text-gray-400">
                   {{ plan.cron_expression }}
@@ -179,7 +234,7 @@
 
               <!-- Auto Recover Badge -->
               <span
-                v-if="plan.auto_recover"
+                v-if="plan.auto_recover && !isDiagnosticType(plan.test_type)"
                 class="inline-flex items-center rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-400"
               >
                 {{ t('admin.scheduledTests.autoRecover') }}
@@ -241,6 +296,16 @@
             <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <div>
                 <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400">
+                  {{ t('admin.scheduledTests.testType') }}
+                </label>
+                <Select
+                  v-model="editForm.test_type"
+                  :options="testTypeOptions"
+                  :placeholder="t('admin.scheduledTests.testType')"
+                />
+              </div>
+              <div v-if="!isDiagnosticType(editForm.test_type)">
+                <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400">
                   {{ t('admin.scheduledTests.model') }}
                 </label>
                 <Select
@@ -249,6 +314,42 @@
                   :placeholder="t('admin.scheduledTests.model')"
                   :searchable="modelOptions.length > 5"
                 />
+              </div>
+              <div v-else>
+                <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400">
+                  {{ t('admin.scheduledTests.diagnosticApiKey') }}
+                </label>
+                <Select
+                  v-model="editForm.api_key_id"
+                  :options="diagnosticKeyOptions"
+                  :placeholder="t('admin.scheduledTests.diagnosticApiKey')"
+                  :searchable="diagnosticKeyOptions.length > 5"
+                />
+                <p v-if="diagnosticOptionsError" class="mt-1 text-xs text-red-600 dark:text-red-400">{{ diagnosticOptionsError }}</p>
+                <p v-else-if="diagnosticOptionsLoading" class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('common.loading') }}...</p>
+              </div>
+              <div v-if="isDiagnosticType(editForm.test_type)" class="sm:col-span-2">
+                <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400">
+                  {{ t('admin.scheduledTests.diagnosticModels') }}
+                </label>
+                <div class="flex flex-wrap gap-2">
+                  <button
+                    v-for="model in diagnosticModels"
+                    :key="model"
+                    type="button"
+                    @click="toggleModel(editForm.models, model)"
+                    :class="[
+                      'rounded-lg border px-2.5 py-1.5 font-mono text-xs transition-colors',
+                      editForm.models.includes(model)
+                        ? 'border-primary-400 bg-primary-50 text-primary-700 dark:border-primary-500 dark:bg-primary-900/30 dark:text-primary-300'
+                        : 'border-gray-200 bg-white text-gray-600 hover:bg-gray-50 dark:border-dark-600 dark:bg-dark-800 dark:text-gray-300 dark:hover:bg-dark-700'
+                    ]"
+                  >
+                    {{ model }}
+                  </button>
+                </div>
+                <p v-if="diagnosticOptionsLoading" class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('common.loading') }}...</p>
+                <p v-else-if="!diagnosticModels.length" class="mt-1 text-xs text-amber-600 dark:text-amber-400">{{ t('admin.scheduledTests.diagnosticNoModels') }}</p>
               </div>
               <div>
                 <label class="mb-1 flex items-center gap-1 text-xs font-medium text-gray-600 dark:text-gray-400">
@@ -306,7 +407,7 @@
                   {{ t('admin.scheduledTests.enabled') }}
                 </label>
               </div>
-              <div class="flex items-end">
+              <div v-if="!isDiagnosticType(editForm.test_type)" class="flex items-end">
                 <div>
                   <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
                     <Toggle v-model="editForm.auto_recover" />
@@ -327,7 +428,7 @@
               </button>
               <button
                 @click="handleEdit"
-                :disabled="!editForm.model_id || !editForm.cron_expression || updating"
+                :disabled="updating || !editForm.cron_expression || (isDiagnosticType(editForm.test_type) ? (!editForm.api_key_id || editForm.models.length === 0) : !editForm.model_id)"
                 class="flex items-center gap-1.5 rounded-lg bg-primary-500 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-primary-600 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <Icon v-if="updating" name="refresh" size="sm" class="animate-spin" :stroke-width="2" />
@@ -370,22 +471,9 @@
                   <div class="flex items-center gap-2">
                     <!-- Status Badge -->
                     <span
-                      :class="[
-                        'inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium',
-                        result.status === 'success'
-                          ? 'bg-green-100 text-green-700 dark:bg-green-500/20 dark:text-green-400'
-                          : result.status === 'running'
-                            ? 'bg-blue-100 text-blue-700 dark:bg-blue-500/20 dark:text-blue-400'
-                            : 'bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-400'
-                      ]"
+                      :class="['inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium', resultStatusClass(result)]"
                     >
-                      {{
-                        result.status === 'success'
-                          ? t('admin.scheduledTests.success')
-                          : result.status === 'running'
-                            ? t('admin.scheduledTests.running')
-                            : t('admin.scheduledTests.failed')
-                      }}
+                      {{ resultStatusLabel(result) }}
                     </span>
 
                     <!-- Latency -->
@@ -398,6 +486,16 @@
                   <span class="text-xs text-gray-400">
                     {{ formatDateTime(result.started_at) }}
                   </span>
+                </div>
+
+                <!-- Diagnostic detail -->
+                <div v-if="result.model_id" class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  <span class="font-mono">{{ result.model_id }}</span>
+                  <template v-if="isDiagnosticResult(result)">
+                    <span v-if="result.predicted_model"> · {{ t('admin.scheduledTests.predictedModel') }} <span class="font-mono">{{ result.predicted_model }}</span></span>
+                    <span v-if="result.probability != null"> · {{ formatProbability(result.probability) }}</span>
+                    <span v-if="result.reason"> · {{ result.reason }}</span>
+                  </template>
                 </div>
 
                 <!-- Response / Error (collapsible) -->
@@ -463,7 +561,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, watch, onBeforeUnmount } from 'vue'
+import { ref, reactive, computed, watch, onBeforeUnmount } from 'vue'
 import { useI18n } from 'vue-i18n'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
@@ -473,9 +571,10 @@ import Input from '@/components/common/Input.vue'
 import Toggle from '@/components/common/Toggle.vue'
 import { Icon } from '@/components/icons'
 import { adminAPI } from '@/api/admin'
+import * as tickets from '@/api/admin/codexTickets'
 import { useAppStore } from '@/stores/app'
 import { formatDateTime } from '@/utils/format'
-import type { ScheduledTestPlan, ScheduledTestResult } from '@/types'
+import type { ScheduledTestPlan, ScheduledTestResult, ScheduledTestType } from '@/types'
 
 const { t } = useI18n()
 const appStore = useAppStore()
@@ -510,8 +609,27 @@ const showDeleteConfirm = ref(false)
 const deletingPlan = ref<ScheduledTestPlan | null>(null)
 const editingPlanId = ref<number | null>(null)
 const updating = ref(false)
+
+// Codex diagnostic options (admin-owned API keys + fingerprint model bank).
+const diagnosticKeys = ref<{ id: number; name: string }[]>([])
+const diagnosticModels = ref<string[]>([])
+const diagnosticOptionsLoading = ref(false)
+const diagnosticOptionsError = ref('')
+
+const testTypeOptions = computed<SelectOption[]>(() => [
+  { value: 'account_test', label: t('admin.scheduledTests.typeAccountTest') },
+  { value: 'codex_diagnostic', label: t('admin.scheduledTests.typeCodexDiagnostic') }
+])
+
+const diagnosticKeyOptions = computed<SelectOption[]>(() =>
+  diagnosticKeys.value.map(key => ({ value: String(key.id), label: `${key.name} · #${key.id}` }))
+)
+
 const editForm = reactive({
+  test_type: 'account_test' as ScheduledTestType,
   model_id: '' as string,
+  models: [] as string[],
+  api_key_id: '' as string,
   cron_expression: '' as string,
   max_results: '100' as string,
   enabled: true,
@@ -519,7 +637,10 @@ const editForm = reactive({
 })
 
 const newPlan = reactive({
+  test_type: 'account_test' as ScheduledTestType,
   model_id: '' as string,
+  models: [] as string[],
+  api_key_id: '' as string,
   cron_expression: '' as string,
   max_results: '100' as string,
   enabled: true,
@@ -527,12 +648,95 @@ const newPlan = reactive({
 })
 
 const resetNewPlan = () => {
+  newPlan.test_type = 'account_test'
   newPlan.model_id = ''
+  newPlan.models = []
+  newPlan.api_key_id = ''
   newPlan.cron_expression = ''
   newPlan.max_results = '100'
   newPlan.enabled = true
   newPlan.auto_recover = false
 }
+
+const isDiagnosticType = (value: string) => value === 'codex_diagnostic'
+
+const toggleModel = (target: string[], model: string) => {
+  const index = target.indexOf(model)
+  if (index === -1) {
+    target.push(model)
+  } else {
+    target.splice(index, 1)
+  }
+}
+
+const loadDiagnosticOptions = async (force = false) => {
+  if (diagnosticOptionsLoading.value) return
+  if (!force && diagnosticKeys.value.length && diagnosticModels.value.length) return
+  diagnosticOptionsLoading.value = true
+  diagnosticOptionsError.value = ''
+  try {
+    const [keys, fingerprint] = await Promise.all([tickets.ownKeys(), tickets.fingerprint()])
+    diagnosticKeys.value = (keys ?? [])
+      .filter(key => key.status === 'active'
+        && (key.quota === 0 || key.quota_used < key.quota)
+        && (!key.expires_at || new Date(key.expires_at) > new Date()))
+      .map(key => ({ id: key.id, name: key.name }))
+    diagnosticModels.value = fingerprint?.models ?? []
+  } catch (error: any) {
+    diagnosticOptionsError.value = error?.message || 'Failed to load diagnostic options'
+  } finally {
+    diagnosticOptionsLoading.value = false
+  }
+}
+
+watch(() => [newPlan.test_type, editForm.test_type], () => {
+  if (isDiagnosticType(newPlan.test_type) || isDiagnosticType(editForm.test_type)) {
+    void loadDiagnosticOptions()
+  }
+})
+
+const planTitle = (plan: ScheduledTestPlan) => {
+  if (isDiagnosticType(plan.test_type)) {
+    return plan.models?.length ? plan.models.join(', ') : t('admin.scheduledTests.diagnosticModels')
+  }
+  return plan.model_id
+}
+
+const isDiagnosticResult = (result: ScheduledTestResult) =>
+  ['normal', 'degraded', 'uncertain'].includes(result.status)
+
+const resultStatusLabel = (result: ScheduledTestResult) => {
+  switch (result.status) {
+    case 'success':
+      return t('admin.scheduledTests.success')
+    case 'running':
+      return t('admin.scheduledTests.running')
+    case 'normal':
+      return t('admin.scheduledTests.statusNormal')
+    case 'degraded':
+      return t('admin.scheduledTests.statusDegraded')
+    case 'uncertain':
+      return t('admin.scheduledTests.statusUncertain')
+    default:
+      return t('admin.scheduledTests.failed')
+  }
+}
+
+const resultStatusClass = (result: ScheduledTestResult) => {
+  switch (result.status) {
+    case 'success':
+    case 'normal':
+      return 'bg-green-100 text-green-700 dark:bg-green-500/20 dark:text-green-400'
+    case 'running':
+    case 'uncertain':
+      return 'bg-amber-100 text-amber-700 dark:bg-amber-500/20 dark:text-amber-400'
+    default:
+      return 'bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-400'
+  }
+}
+
+const formatProbability = (value: number | null | undefined) =>
+  typeof value === 'number' ? `${(value * 100).toFixed(1)}%` : ''
 
 // Load plans when dialog opens
 watch(
@@ -564,17 +768,26 @@ const loadPlans = async () => {
 }
 
 const handleCreate = async () => {
-  if (!props.accountId || !newPlan.model_id || !newPlan.cron_expression) return
+  if (!props.accountId || !newPlan.cron_expression) return
+  const diagnostic = isDiagnosticType(newPlan.test_type)
+  if (diagnostic) {
+    if (!newPlan.api_key_id || newPlan.models.length === 0) return
+  } else if (!newPlan.model_id) {
+    return
+  }
   creating.value = true
   try {
     const maxResults = Number(newPlan.max_results) || 100
     await adminAPI.scheduledTests.create({
       account_id: props.accountId,
-      model_id: newPlan.model_id,
+      test_type: newPlan.test_type,
+      ...(diagnostic
+        ? { model_id: '', models: [...newPlan.models], api_key_id: Number(newPlan.api_key_id) }
+        : { model_id: newPlan.model_id, models: [], api_key_id: null }),
       cron_expression: newPlan.cron_expression,
       enabled: newPlan.enabled,
       max_results: maxResults,
-      auto_recover: newPlan.auto_recover
+      auto_recover: diagnostic ? false : newPlan.auto_recover
     })
     appStore.showSuccess(t('admin.scheduledTests.createSuccess'))
     showAddForm.value = false
@@ -602,7 +815,10 @@ const handleToggleEnabled = async (plan: ScheduledTestPlan, enabled: boolean) =>
 
 const startEdit = (plan: ScheduledTestPlan) => {
   editingPlanId.value = plan.id
+  editForm.test_type = plan.test_type || 'account_test'
   editForm.model_id = plan.model_id
+  editForm.models = [...(plan.models ?? [])]
+  editForm.api_key_id = plan.api_key_id ? String(plan.api_key_id) : ''
   editForm.cron_expression = plan.cron_expression
   editForm.max_results = String(plan.max_results)
   editForm.enabled = plan.enabled
@@ -614,15 +830,24 @@ const cancelEdit = () => {
 }
 
 const handleEdit = async () => {
-  if (!editingPlanId.value || !editForm.model_id || !editForm.cron_expression) return
+  if (!editingPlanId.value || !editForm.cron_expression) return
+  const diagnostic = isDiagnosticType(editForm.test_type)
+  if (diagnostic) {
+    if (!editForm.api_key_id || editForm.models.length === 0) return
+  } else if (!editForm.model_id) {
+    return
+  }
   updating.value = true
   try {
     const updated = await adminAPI.scheduledTests.update(editingPlanId.value, {
-      model_id: editForm.model_id,
+      test_type: editForm.test_type,
+      model_id: diagnostic ? '' : editForm.model_id,
+      models: diagnostic ? [...editForm.models] : [],
+      api_key_id: diagnostic ? Number(editForm.api_key_id) : null,
       cron_expression: editForm.cron_expression,
       max_results: Number(editForm.max_results) || 100,
       enabled: editForm.enabled,
-      auto_recover: editForm.auto_recover
+      auto_recover: diagnostic ? false : editForm.auto_recover
     })
     const index = plans.value.findIndex((p) => p.id === editingPlanId.value)
     if (index !== -1) {

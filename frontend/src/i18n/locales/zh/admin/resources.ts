@@ -37,7 +37,18 @@ export default {
       maxResultsTooltipExample: '例如填写 100，表示最多保存最近 100 次测试结果；第 101 次结果写入后，最早的一条会被清理。',
       maxResultsTooltipRange: '推荐填写范围：一般可填 20 到 200。只关注近期可用性时可填 20-50；需要回看较长时间的波动趋势时可填 100-200。',
       autoRecover: '自动恢复',
-      autoRecoverHelp: '测试成功后自动恢复异常状态的账号'
+      autoRecoverHelp: '测试成功后自动恢复异常状态的账号',
+      testType: '检测类型',
+      typeAccountTest: '账号连通性测试',
+      typeCodexDiagnostic: '降智检测',
+      diagnosticApiKey: '计费 API Key',
+      diagnosticModels: '检测模型',
+      diagnosticNoKeys: '没有可用于检测的 API Key',
+      diagnosticNoModels: '模型指纹库为空，请先在账号的降智检测里更新指纹库',
+      statusNormal: '正常',
+      statusDegraded: '疑似降智',
+      statusUncertain: '不确定',
+      predictedModel: '预测模型'
     },
 
     // Proxies Management

@@ -13,6 +13,7 @@ import (
 	"github.com/MACOS-DO/sub4api/internal/pkg/claude"
 	"github.com/MACOS-DO/sub4api/internal/pkg/logger"
 	"github.com/MACOS-DO/sub4api/internal/pkg/xai"
+	"github.com/gin-gonic/gin"
 	"github.com/google/wire"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
@@ -662,8 +663,15 @@ func ProvideScheduledTestRunnerService(
 	accountTestSvc *AccountTestService,
 	rateLimitSvc *RateLimitService,
 	cfg *config.Config,
+	openAIGatewayService *OpenAIGatewayService,
+	apiKeyService *APIKeyService,
+	engine *gin.Engine,
 ) *ScheduledTestRunnerService {
-	svc := NewScheduledTestRunnerService(planRepo, scheduledSvc, accountTestSvc, rateLimitSvc, cfg)
+	diagnostic := NewCodexDiagnosticExecutor(openAIGatewayService, apiKeyService)
+	if engine != nil {
+		diagnostic.SetRouter(engine)
+	}
+	svc := NewScheduledTestRunnerService(planRepo, scheduledSvc, accountTestSvc, rateLimitSvc, cfg, diagnostic)
 	svc.Start()
 	return svc
 }

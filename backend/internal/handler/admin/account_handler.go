@@ -71,6 +71,7 @@ type AccountHandler struct {
 	codexTicketGateway      *service.OpenAIGatewayService
 	codexTicketRouter       http.Handler
 	codexTicketAPIKeys      *service.APIKeyService
+	codexTicketDiagnostic   *service.CodexDiagnosticExecutor
 	cfg                     *config.Config
 	opencodeGoUsage         *service.OpenCodeGoUsageService
 }

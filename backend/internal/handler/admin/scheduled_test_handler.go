@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -20,20 +21,46 @@ func NewScheduledTestHandler(scheduledTestSvc *service.ScheduledTestService) *Sc
 }
 
 type createScheduledTestPlanRequest struct {
-	AccountID      int64  `json:"account_id" binding:"required"`
-	ModelID        string `json:"model_id"`
-	CronExpression string `json:"cron_expression" binding:"required"`
-	Enabled        *bool  `json:"enabled"`
-	MaxResults     int    `json:"max_results"`
-	AutoRecover    *bool  `json:"auto_recover"`
+	AccountID      int64    `json:"account_id" binding:"required"`
+	TestType       string   `json:"test_type"`
+	ModelID        string   `json:"model_id"`
+	Models         []string `json:"models"`
+	APIKeyID       *int64   `json:"api_key_id"`
+	CronExpression string   `json:"cron_expression" binding:"required"`
+	Enabled        *bool    `json:"enabled"`
+	MaxResults     int      `json:"max_results"`
+	AutoRecover    *bool    `json:"auto_recover"`
 }
 
 type updateScheduledTestPlanRequest struct {
-	ModelID        string `json:"model_id"`
-	CronExpression string `json:"cron_expression"`
-	Enabled        *bool  `json:"enabled"`
-	MaxResults     int    `json:"max_results"`
-	AutoRecover    *bool  `json:"auto_recover"`
+	TestType       string   `json:"test_type"`
+	ModelID        string   `json:"model_id"`
+	Models         []string `json:"models"`
+	APIKeyID       *int64   `json:"api_key_id"`
+	CronExpression string   `json:"cron_expression"`
+	Enabled        *bool    `json:"enabled"`
+	MaxResults     int      `json:"max_results"`
+	AutoRecover    *bool    `json:"auto_recover"`
+}
+
+func validateScheduledDiagnosticModels(models []string) error {
+	if len(models) == 0 {
+		return nil
+	}
+	allowed, err := service.ModelTraceGPTModels()
+	if err != nil {
+		return err
+	}
+	modelSet := make(map[string]bool, len(allowed))
+	for _, model := range allowed {
+		modelSet[model] = true
+	}
+	for _, model := range models {
+		if !modelSet[model] {
+			return fmt.Errorf("unsupported GPT model %q", model)
+		}
+	}
+	return nil
 }
 
 // ListByAccount GET /admin/accounts/:id/scheduled-test-plans
@@ -62,7 +89,10 @@ func (h *ScheduledTestHandler) Create(c *gin.Context) {
 
 	plan := &service.ScheduledTestPlan{
 		AccountID:      req.AccountID,
+		TestType:       req.TestType,
 		ModelID:        req.ModelID,
+		Models:         req.Models,
+		APIKeyID:       req.APIKeyID,
 		CronExpression: req.CronExpression,
 		Enabled:        true,
 		MaxResults:     req.MaxResults,
@@ -72,6 +102,10 @@ func (h *ScheduledTestHandler) Create(c *gin.Context) {
 	}
 	if req.AutoRecover != nil {
 		plan.AutoRecover = *req.AutoRecover
+	}
+	if err := validateScheduledDiagnosticModels(req.Models); err != nil {
+		response.BadRequest(c, err.Error())
+		return
 	}
 
 	created, err := h.scheduledTestSvc.CreatePlan(c.Request.Context(), plan)
@@ -102,8 +136,21 @@ func (h *ScheduledTestHandler) Update(c *gin.Context) {
 		return
 	}
 
+	if req.TestType != "" {
+		existing.TestType = req.TestType
+	}
 	if req.ModelID != "" {
 		existing.ModelID = req.ModelID
+	}
+	if req.Models != nil {
+		if err := validateScheduledDiagnosticModels(req.Models); err != nil {
+			response.BadRequest(c, err.Error())
+			return
+		}
+		existing.Models = req.Models
+	}
+	if req.APIKeyID != nil {
+		existing.APIKeyID = req.APIKeyID
 	}
 	if req.CronExpression != "" {
 		existing.CronExpression = req.CronExpression

@@ -2492,10 +2492,15 @@ export interface TotpLogin2FARequest {
 
 // ==================== Scheduled Test Types ====================
 
+export type ScheduledTestType = 'account_test' | 'codex_diagnostic'
+
 export interface ScheduledTestPlan {
   id: number
   account_id: number
+  test_type: ScheduledTestType
   model_id: string
+  models: string[]
+  api_key_id: number | null
   cron_expression: string
   enabled: boolean
   max_results: number
@@ -2509,9 +2514,14 @@ export interface ScheduledTestPlan {
 export interface ScheduledTestResult {
   id: number
   plan_id: number
+  model_id: string
   status: string
   response_text: string
   error_message: string
+  predicted_model: string
+  probability: number | null
+  reason: string
+  http_status: number
   latency_ms: number
   started_at: string
   finished_at: string
@@ -2520,7 +2530,10 @@ export interface ScheduledTestResult {
 
 export interface CreateScheduledTestPlanRequest {
   account_id: number
-  model_id: string
+  test_type?: ScheduledTestType
+  model_id?: string
+  models?: string[]
+  api_key_id?: number | null
   cron_expression: string
   enabled?: boolean
   max_results?: number
@@ -2528,7 +2541,10 @@ export interface CreateScheduledTestPlanRequest {
 }
 
 export interface UpdateScheduledTestPlanRequest {
+  test_type?: ScheduledTestType
   model_id?: string
+  models?: string[]
+  api_key_id?: number | null
   cron_expression?: string
   enabled?: boolean
   max_results?: number
