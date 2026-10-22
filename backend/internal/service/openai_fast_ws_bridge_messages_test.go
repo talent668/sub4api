@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -215,4 +217,219 @@ func TestOpenAIGatewayService_ForwardAsAnthropic_FastBridgeFirstOutputTimeout(t 
 	require.Nil(t, upstream.lastReq, "deadline already passed: HTTP fallback would time out immediately")
 	require.False(t, c.Writer.Written())
 	require.Empty(t, rec.Body.String())
+}
+
+func TestOpenAIGatewayService_ForwardAsAnthropic_FastBridgeBufferedDeltaRecovery(t *testing.T) {
+	for _, terminalOutput := range []string{`[]`, `[{"type":"message","role":"assistant","content":[{"type":"output_text","text":""}]},{"type":"function_call","call_id":"call_1","name":"lookup","arguments":""}]`} {
+		t.Run(terminalOutput, func(t *testing.T) {
+			conn := &openAIWSCaptureConn{events: [][]byte{
+				[]byte(`{"type":"response.output_text.delta","delta":"ok"}`),
+				[]byte(`{"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","call_id":"call_1","name":"lookup","arguments":""}}`),
+				[]byte(`{"type":"response.function_call_arguments.delta","output_index":1,"delta":"{\"q\":\"hi\"}"}`),
+				[]byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp_delta","model":"gpt-6.1-sol","status":"completed","output":%s,"usage":{"input_tokens":5,"output_tokens":2}}}`, terminalOutput)),
+			}}
+			svc, upstream, _ := newFastWSBridgeTestService(t, newOpenAIWSV2TestConfig(), conn)
+			body := anthropicMessagesBridgeTestBody(false)
+			c, rec := newAnthropicMessagesBridgeTestGinContext(t, body)
+			result, err := svc.ForwardAsAnthropic(fastWSBridgeTestContext(OpenAIFastTierPriority), c, fastWSBridgeTestAccount(false, false), body, "", "gpt-6.1-sol")
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			require.Nil(t, upstream.lastReq)
+			require.Equal(t, "ok", gjson.Get(rec.Body.String(), "content.0.text").String())
+			require.Equal(t, "tool_use", gjson.Get(rec.Body.String(), "content.1.type").String())
+			require.Equal(t, "hi", gjson.Get(rec.Body.String(), "content.1.input.q").String())
+		})
+	}
+}
+
+func TestOpenAIGatewayService_ForwardAsAnthropic_FastBridgeCyberPolicy(t *testing.T) {
+	for _, stream := range []bool{true, false} {
+		for _, eventType := range []string{"response.failed", "error"} {
+			t.Run(fmt.Sprintf("stream=%v/%s", stream, eventType), func(t *testing.T) {
+				event := `{"type":"response.failed","response":{"id":"resp_cyber","model":"gpt-6.1-sol","status":"failed","output":[],"error":{"code":"cyber_policy","message":"blocked by cyber policy"},"usage":{"input_tokens":9,"output_tokens":2}}}`
+				if eventType == "error" {
+					event = `{"type":"error","error":{"code":"cyber_policy","message":"blocked by cyber policy"},"usage":{"input_tokens":9,"output_tokens":2}}`
+				}
+				svc, upstream, _ := newFastWSBridgeTestService(t, newOpenAIWSV2TestConfig(), &openAIWSCaptureConn{events: [][]byte{[]byte(event)}})
+				useAnthropicMessagesBridgeSSEUpstream(upstream)
+				body := anthropicMessagesBridgeTestBody(stream)
+				c, rec := newAnthropicMessagesBridgeTestGinContext(t, body)
+				result, err := svc.ForwardAsAnthropic(fastWSBridgeTestContext(OpenAIFastTierPriority), c, fastWSBridgeTestAccount(false, false), body, "", "gpt-6.1-sol")
+				require.Error(t, err)
+				require.Nil(t, result, "cyber-policy result must not enter normal usage billing")
+				var failoverErr *UpstreamFailoverError
+				require.False(t, errors.As(err, &failoverErr))
+				require.Nil(t, upstream.lastReq, "cyber-policy is terminal, not an HTTP-fallback trigger")
+				mark := GetOpsCyberPolicy(c)
+				require.NotNil(t, mark)
+				require.Equal(t, 9, mark.UpstreamInTok)
+				require.Equal(t, 2, mark.UpstreamOutTok)
+				require.ErrorIs(t, err, errOpenAICyberPolicyForwarded)
+				if stream {
+					require.Contains(t, rec.Body.String(), "event: error")
+				} else {
+					require.Equal(t, "error", gjson.Get(rec.Body.String(), "type").String())
+					require.Equal(t, "invalid_request_error", gjson.Get(rec.Body.String(), "error.type").String())
+					require.Contains(t, gjson.Get(rec.Body.String(), "error.message").String(), "blocked by cyber policy")
+				}
+			})
+		}
+	}
+}
+
+func TestOpenAIGatewayService_ForwardAsAnthropic_FastBridgeConverterTimeoutStopsWS(t *testing.T) {
+	for _, stream := range []bool{true, false} {
+		t.Run(fmt.Sprintf("stream=%v", stream), func(t *testing.T) {
+			cfg := newOpenAIWSV2TestConfig()
+			cfg.Gateway.StreamDataIntervalTimeout = 1
+			cfg.Gateway.OpenAIWS.ReadTimeoutSeconds = 5
+			conn := &openAIWSCaptureConn{
+				readDelays: []time.Duration{0, 4 * time.Second},
+				events: [][]byte{
+					[]byte(`{"type":"response.output_text.delta","delta":"ok"}`),
+					[]byte(`{"type":"response.completed","response":{"id":"resp_timeout","model":"gpt-6.1-sol","status":"completed","output":[],"usage":{"input_tokens":5,"output_tokens":2}}}`),
+				},
+			}
+			svc, upstream, _ := newFastWSBridgeTestService(t, cfg, conn)
+			body := anthropicMessagesBridgeTestBody(stream)
+			c, _ := newAnthropicMessagesBridgeTestGinContext(t, body)
+			started := time.Now()
+			_, err := svc.ForwardAsAnthropic(fastWSBridgeTestContext(OpenAIFastTierPriority), c, fastWSBridgeTestAccount(false, false), body, "", "gpt-6.1-sol")
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "interval timeout")
+			require.Less(t, time.Since(started), 3*time.Second, "converter timeout must not wait for the WS read timeout")
+			require.Nil(t, upstream.lastReq)
+		})
+	}
+}
+
+func TestOpenAIGatewayService_ForwardAsAnthropic_FastBridgeIsolatesSessionState(t *testing.T) {
+	cfg := newOpenAIWSV2TestConfig()
+	conn := newAnthropicMessagesBridgeCaptureConn(t)
+	svc, _, dialer := newFastWSBridgeTestService(t, cfg, conn)
+	body := anthropicMessagesBridgeTestBody(true)
+	c, _ := newAnthropicMessagesBridgeTestGinContext(t, body)
+	c.Set("api_key", &APIKey{ID: 202})
+	c.Request.Header.Set("session_id", "shared_client_seed")
+	// This is the unscoped slot a different API key can have populated.
+	rawHash := svc.GenerateSessionHash(c, nil)
+	require.NotEmpty(t, rawHash)
+	svc.getOpenAIWSStateStore().BindSessionTurnState(0, rawHash, "other_api_key_turn", time.Minute)
+	result, err := svc.ForwardAsAnthropic(fastWSBridgeTestContext(OpenAIFastTierPriority), c, fastWSBridgeTestAccount(false, false), body, "shared_client_seed", "gpt-6.1-sol")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Empty(t, dialer.lastHeaders.Get(openAIWSTurnStateHeader), "another API key's WS turn state must not leak into the Messages bridge")
+}
+
+func TestApplyOpenAIWSBridgeResultFieldsUsesTurnIdentityAndRawMetadata(t *testing.T) {
+	header := http.Header{"X-Request-Id": []string{"same_ws_handshake"}}
+	sink := newOpenAIWSPipeDownstream(io.Discard, nil)
+	sink.SetHandshakeHeaders(header)
+	for _, responseID := range []string{"resp_turn_1", "resp_turn_2"} {
+		converted := &OpenAIForwardResult{RequestID: "same_ws_handshake", UpstreamResponseModel: "claude-sonnet-4-6", FirstTokenMs: new(int)}
+		wsResult := &OpenAIForwardResult{
+			RequestID: responseID, ResponseID: responseID,
+			UpstreamResponseModel: "gpt-6.1-sol", UpstreamResponseModelConflict: true,
+			UpstreamResponseServiceTier: "default",
+		}
+		applyOpenAIWSBridgeResultFields(converted, wsResult, sink)
+		require.Equal(t, responseID, converted.RequestID, "WS billing identity must be per turn, not per handshake")
+		require.Equal(t, "same_ws_handshake", converted.UpstreamHeaders.Get("x-request-id"))
+		require.Equal(t, "gpt-6.1-sol", converted.UpstreamResponseModel)
+		require.True(t, converted.UpstreamResponseModelConflict)
+		require.Equal(t, "default", converted.UpstreamResponseServiceTier)
+		require.Nil(t, converted.FirstTokenMs, "a terminal-only turn has no semantic first-token timestamp")
+	}
+}
+
+func TestOpenAIGatewayService_ForwardAsAnthropic_FastBridgeTopLevelTerminalUsage(t *testing.T) {
+	conn := &openAIWSCaptureConn{events: [][]byte{
+		[]byte(`{"type":"response.output_text.delta","delta":"ok"}`),
+		[]byte(`{"type":"response.completed","response":{"id":"resp_usage","model":"gpt-6.1-sol","status":"completed","output":[]},"usage":{"input_tokens":13,"output_tokens":3}}`),
+	}}
+	svc, _, _ := newFastWSBridgeTestService(t, newOpenAIWSV2TestConfig(), conn)
+	body := anthropicMessagesBridgeTestBody(false)
+	c, rec := newAnthropicMessagesBridgeTestGinContext(t, body)
+	result, err := svc.ForwardAsAnthropic(fastWSBridgeTestContext(OpenAIFastTierPriority), c, fastWSBridgeTestAccount(false, false), body, "", "gpt-6.1-sol")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, 13, result.Usage.InputTokens)
+	require.Equal(t, 3, result.Usage.OutputTokens)
+	require.Equal(t, int64(13), gjson.Get(rec.Body.String(), "usage.input_tokens").Int())
+	require.Equal(t, int64(3), gjson.Get(rec.Body.String(), "usage.output_tokens").Int())
+}
+
+func TestOpenAIGatewayService_ForwardAsAnthropic_FastBridgeRawResponseObservation(t *testing.T) {
+	for _, stream := range []bool{true, false} {
+		t.Run(fmt.Sprintf("stream=%v", stream), func(t *testing.T) {
+			conn := newAnthropicMessagesBridgeCaptureConn(t)
+			conn.events[2] = []byte(strings.Replace(string(conn.events[2]), `"status":"completed"`, `"service_tier":"default","status":"completed"`, 1))
+			svc, _, dialer := newFastWSBridgeTestService(t, newOpenAIWSV2TestConfig(), conn)
+			dialer.handshake = http.Header{"X-Request-Id": []string{"rid_shared_handshake"}}
+			body := []byte(strings.Replace(string(anthropicMessagesBridgeTestBody(stream)), "gpt-6.1-sol", "claude-sonnet-4-6", 1))
+			c, rec := newAnthropicMessagesBridgeTestGinContext(t, body)
+			result, err := svc.ForwardAsAnthropic(fastWSBridgeTestContext(OpenAIFastTierPriority), c, fastWSBridgeTestAccount(false, false), body, "", "gpt-6.1-sol")
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			require.Equal(t, "gpt-6.1-sol", result.UpstreamResponseModel)
+			require.False(t, result.UpstreamResponseModelConflict)
+			require.Equal(t, "resp_msg_ws", result.RequestID)
+			require.Equal(t, "rid_shared_handshake", result.UpstreamHeaders.Get("x-request-id"))
+			require.Equal(t, "default", result.UpstreamResponseServiceTier)
+			require.NotNil(t, result.ServiceTier)
+			require.Equal(t, OpenAIFastTierPriority, *result.ServiceTier, "Codex outbound fast tier remains separate from its default echo")
+			require.Contains(t, rec.Body.String(), "claude-sonnet-4-6")
+		})
+	}
+}
+
+type anthropicMessagesBridgeCancelConn struct {
+	*openAIWSCaptureConn
+	cancel   context.CancelFunc
+	cancelAt int
+	reads    int
+}
+
+func (c *anthropicMessagesBridgeCancelConn) ReadMessage(ctx context.Context) ([]byte, error) {
+	c.reads++
+	if c.reads == c.cancelAt {
+		// Cancel before returning the next event, so only the WS drain sees it.
+		c.cancel()
+	}
+	return c.openAIWSCaptureConn.ReadMessage(ctx)
+}
+
+func TestOpenAIGatewayService_ForwardAsAnthropic_FastBridgeCanceledDrainUsage(t *testing.T) {
+	for _, tc := range []struct {
+		stream   bool
+		cancelAt int
+	}{{true, 2}, {true, 3}, {false, 2}, {false, 3}} {
+		stream, readToCancel := tc.stream, tc.cancelAt
+		t.Run(fmt.Sprintf("stream=%v/cancelAt=%d", stream, readToCancel), func(t *testing.T) {
+			cfg := newOpenAIWSV2TestConfig()
+			ctx, cancel := context.WithCancel(fastWSBridgeTestContext(OpenAIFastTierPriority))
+			defer cancel()
+			capture := newAnthropicMessagesBridgeCaptureConn(t)
+			capture.events[2] = []byte(`{"type":"response.completed","response":{"id":"resp_msg_ws","model":"gpt-6.1-sol","service_tier":"default","status":"completed","output":[],"usage":{"input_tokens":17,"output_tokens":4,"input_tokens_details":{"cached_tokens":6}}}}`)
+			svc, upstream, _ := newFastWSBridgeTestService(t, cfg, capture)
+			useAnthropicMessagesBridgeSSEUpstream(upstream)
+			useFastWSBridgeTestDialer(svc, cfg, &sequenceFastWSBridgeDialer{conns: []openAIWSClientConn{&anthropicMessagesBridgeCancelConn{openAIWSCaptureConn: capture, cancel: cancel, cancelAt: readToCancel}}})
+			body := anthropicMessagesBridgeTestBody(stream)
+			c, _ := newAnthropicMessagesBridgeTestGinContext(t, body)
+			c.Request = c.Request.WithContext(ctx)
+			result, err := svc.ForwardAsAnthropic(ctx, c, fastWSBridgeTestAccount(false, false), body, "", "gpt-6.1-sol")
+			require.NotNil(t, result)
+			require.Equal(t, 17, result.Usage.InputTokens)
+			require.Equal(t, 4, result.Usage.OutputTokens)
+			require.Equal(t, 6, result.Usage.CacheReadInputTokens)
+			require.True(t, result.ClientDisconnect)
+			require.Equal(t, "default", result.UpstreamResponseServiceTier)
+			require.Equal(t, "response.completed", result.UpstreamTerminalEvent)
+			require.Nil(t, upstream.lastReq, "a canceled request must not be replayed via HTTP")
+			require.Equal(t, stream, result.Stream)
+			if readToCancel == 3 {
+				require.Error(t, err, "downstream did not receive a terminal event")
+			}
+		})
+	}
 }

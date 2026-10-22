@@ -391,8 +391,18 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 				bridgeFirstOutputTimeout,
 			)
 			restoreTurnState()
+			// The WS forwarder may mark a terminal cyber-policy rejection even
+			// before emitting a frame. Preserve the HTTP path's dedicated error
+			// result/usage handling, and never replay this rejection over HTTP.
+			if GetOpsCyberPolicy(c) != nil {
+				if !c.Writer.Written() {
+					mark := GetOpsCyberPolicy(c)
+					writeAnthropicError(c, http.StatusBadRequest, "invalid_request_error", mark.Message)
+				}
+				return nil, errOpenAICyberPolicyForwarded
+			}
 			if bridgeHandled {
-				if bridgeResult != nil {
+				if bridgeErr == nil && bridgeResult != nil {
 					s.finalizeAnthropicMessagesWSResult(
 						ctx,
 						c,
@@ -690,7 +700,13 @@ func (s *OpenAIGatewayService) handleAnthropicBufferedStreamingResponse(
 
 	if strings.TrimSpace(finalResponse.Status) == "failed" {
 		payload, _ := json.Marshal(gin.H{"type": "response.failed", "response": finalResponse})
-		if hit, code, msg := detectOpenAICyberPolicy(payload); hit {
+		hit, code, msg := detectOpenAICyberPolicy(payload)
+		// The WS forwarder can already have identified a bare error envelope,
+		// whose nested error code is not retained by ResponsesStreamEvent.
+		if mark := GetOpsCyberPolicy(c); mark != nil {
+			hit, code, msg = true, mark.Code, mark.Message
+		}
+		if hit {
 			MarkOpsCyberPolicy(c, CyberPolicyMark{
 				Code:           code,
 				Message:        msg,

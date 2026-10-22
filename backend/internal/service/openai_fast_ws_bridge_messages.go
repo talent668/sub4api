@@ -1,7 +1,6 @@
 package service
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -104,13 +103,10 @@ func (s *OpenAIGatewayService) forwardAnthropicMessagesViaFastWS(
 	reasoningEffort string,
 	firstOutputTimeout time.Duration,
 ) (*OpenAIForwardResult, error, bool) {
-	if !clientStream {
-		return s.forwardAnthropicMessagesViaFastWSNonStream(
-			ctx, c, account, token, reqBody, promptCacheKey, decision, isCodexCLI,
-			originalModel, billingModel, upstreamModel, startTime, reasoningEffort,
-		)
-	}
-
+	// Both client modes need the full event stream: buffered Messages replies
+	// recover missing terminal text/tool arguments from the preceding deltas.
+	wsCtx, stopWS := context.WithCancelCause(ctx)
+	defer stopWS(nil)
 	pr, pw := io.Pipe()
 	firstWrite := make(chan struct{})
 	var firstWriteOnce sync.Once
@@ -118,6 +114,13 @@ func (s *OpenAIGatewayService) forwardAnthropicMessagesViaFastWS(
 		firstWriteOnce.Do(func() { close(firstWrite) })
 	})
 
+	// Keep the shared WS pool/state store in the same account/API-key namespace
+	// as HTTP Messages continuation, even when clients reuse a raw session seed.
+	sessionSeed := strings.TrimSpace(promptCacheKey)
+	if sessionSeed == "" {
+		sessionSeed = s.GenerateSessionHash(c, nil)
+	}
+	executionScope, _ := deriveOpenAISessionHashes(openAICompatSessionResponseKey(c, account, sessionSeed))
 	agentTaskRecoveryTried := false
 	done := make(chan struct{})
 	var wsResult *OpenAIForwardResult
@@ -125,12 +128,12 @@ func (s *OpenAIGatewayService) forwardAnthropicMessagesViaFastWS(
 	go func() {
 		defer close(done)
 		wsResult, wsErr = s.forwardOpenAIWSV2(
-			ctx,
+			wsCtx,
 			c,
 			account,
 			reqBody,
 			promptCacheKey,
-			"", // execution scope: session hash falls back to promptCacheKey
+			executionScope,
 			token,
 			decision,
 			isCodexCLI,
@@ -159,6 +162,18 @@ func (s *OpenAIGatewayService) forwardAnthropicMessagesViaFastWS(
 	case <-firstWrite:
 	case <-done:
 		_ = pr.Close()
+		// A canceled client can leave no pipe frames while the WS forwarder
+		// still drains a complete, billable turn. Never replay that turn over HTTP.
+		if wsResult != nil && wsResult.ClientDisconnect {
+			wsResult.Model = originalModel
+			wsResult.BillingModel = billingModel
+			wsResult.Stream = clientStream
+			applyOpenAIWSBridgeResultFields(wsResult, wsResult, sink)
+			return wsResult, wsErr, true
+		}
+		if ctx.Err() != nil {
+			return wsResult, ctx.Err(), true
+		}
 		// 首个语义输出超时意味着截止时间已经过去：HTTP 兜底会立刻再次超时，
 		// 与 Forward 一致直接交给上层切换账号。
 		var failoverErr *UpstreamFailoverError
@@ -173,98 +188,42 @@ func (s *OpenAIGatewayService) forwardAnthropicMessagesViaFastWS(
 		Header:     sink.HeaderSnapshot(),
 		Body:       pr,
 	}
-	result, convErr := s.handleAnthropicStreamingResponse(resp, c, account, originalModel, billingModel, upstreamModel, startTime)
-	// The converter may return early (e.g. terminal event or fatal upstream
-	// event); closing the read side makes any later WS write fail immediately
-	// instead of blocking the forwarder forever.
+	var result *OpenAIForwardResult
+	var convErr error
+	if clientStream {
+		result, convErr = s.handleAnthropicStreamingResponse(resp, c, account, originalModel, billingModel, upstreamModel, startTime)
+	} else {
+		result, convErr = s.handleAnthropicBufferedStreamingResponse(resp, c, account, originalModel, billingModel, upstreamModel, startTime)
+	}
+	// An adapter timeout must interrupt a pending WS read as well as pipe writes.
+	// Actual client cancellation keeps the forwarder's detached usage drain.
+	if convErr != nil && ctx.Err() == nil {
+		stopWS(errOpenAIWSBridgeConverterStopped)
+	}
 	_ = pr.CloseWithError(io.ErrClosedPipe)
 	<-done
 
+	if result == nil && wsResult != nil && wsResult.ClientDisconnect {
+		// The buffered converter cannot build a reply without a terminal frame,
+		// but the detached WS drain may still have complete usage for billing.
+		result = wsResult
+		result.Model = originalModel
+		result.BillingModel = billingModel
+		result.Stream = clientStream
+	}
 	applyOpenAIWSBridgeResultFields(result, wsResult, sink)
 	if convErr != nil {
 		return result, convErr, true
 	}
-	if wsErr != nil && result == nil {
-		return nil, wsErr, true
+	if wsErr != nil {
+		return result, wsErr, true
 	}
 	return result, nil, true
 }
 
-// forwardAnthropicMessagesViaFastWSNonStream buffers the upstream WS terminal
-// response and converts it exactly like the HTTP compat path does: a synthetic
-// terminal SSE event is fed to the existing buffered converter.
-func (s *OpenAIGatewayService) forwardAnthropicMessagesViaFastWSNonStream(
-	ctx context.Context,
-	c *gin.Context,
-	account *Account,
-	token string,
-	reqBody map[string]any,
-	promptCacheKey string,
-	decision OpenAIWSProtocolDecision,
-	isCodexCLI bool,
-	originalModel string,
-	billingModel string,
-	upstreamModel string,
-	startTime time.Time,
-	reasoningEffort string,
-) (*OpenAIForwardResult, error, bool) {
-	sink := newOpenAIWSCollectDownstream()
-	agentTaskRecoveryTried := false
-	wsResult, wsErr := s.forwardOpenAIWSV2(
-		ctx,
-		c,
-		account,
-		reqBody,
-		promptCacheKey,
-		"",
-		token,
-		decision,
-		isCodexCLI,
-		false,
-		originalModel,
-		upstreamModel,
-		startTime,
-		1,
-		"",
-		&agentTaskRecoveryTried,
-		0,
-		reasoningEffort,
-		sink,
-	)
-	if wsErr != nil || wsResult == nil {
-		// WS 在写出任何下游字节前失败：交回调用方走 HTTP。
-		return nil, nil, false
-	}
-	status, _, body := sink.CollectedJSON()
-	if len(body) == 0 {
-		return nil, nil, false
-	}
-	if status != 0 && status != http.StatusOK {
-		return nil, nil, false
-	}
-	eventType := "response.completed"
-	switch strings.TrimSpace(gjson.GetBytes(body, "status").String()) {
-	case "failed":
-		eventType = "response.failed"
-	case "incomplete":
-		eventType = "response.incomplete"
-	}
-	var eventPayload bytes.Buffer
-	eventPayload.WriteString(`{"type":"`)
-	eventPayload.WriteString(eventType)
-	eventPayload.WriteString(`","response":`)
-	eventPayload.Write(body)
-	eventPayload.WriteString(`}`)
-
-	resp := &http.Response{
-		StatusCode: http.StatusOK,
-		Header:     sink.HeaderSnapshot(),
-		Body:       io.NopCloser(strings.NewReader("data: " + eventPayload.String() + "\n\n")),
-	}
-	result, convErr := s.handleAnthropicBufferedStreamingResponse(resp, c, account, originalModel, billingModel, upstreamModel, startTime)
-	applyOpenAIWSBridgeResultFields(result, wsResult, sink)
-	return result, convErr, true
-}
+// errOpenAIWSBridgeConverterStopped distinguishes adapter failure from a real
+// client disconnect, for which the WS forwarder must continue draining usage.
+var errOpenAIWSBridgeConverterStopped = errors.New("messages WS converter stopped")
 
 // applyOpenAIWSBridgeResultFields merges the WS attempt metadata into the result
 // produced by the Anthropic converter so usage/ops can tell this request went
@@ -286,8 +245,12 @@ func applyOpenAIWSBridgeResultFields(result, wsResult *OpenAIForwardResult, sink
 	if result.ResponseID == "" {
 		result.ResponseID = wsResult.ResponseID
 	}
-	if result.RequestID == "" {
+	// WS usage deduplicates by RequestID. A handshake x-request-id is shared
+	// across turns on a pooled connection, so use the forwarder's response ID.
+	if wsResult.RequestID != "" {
 		result.RequestID = wsResult.RequestID
+	} else if wsResult.ResponseID != "" {
+		result.RequestID = wsResult.ResponseID
 	}
 	if result.ResponseHeaders == nil {
 		result.ResponseHeaders = wsResult.ResponseHeaders
@@ -295,9 +258,18 @@ func applyOpenAIWSBridgeResultFields(result, wsResult *OpenAIForwardResult, sink
 	if result.UpstreamHeaders == nil {
 		result.UpstreamHeaders = wsResult.ResponseHeaders
 	}
-	if result.FirstTokenMs == nil {
-		result.FirstTokenMs = wsResult.FirstTokenMs
+	result.FirstTokenMs = wsResult.FirstTokenMs
+	// The forwarder observes raw frames before client-facing model rewriting
+	// and can continue reading after the converter has stopped. Its terminal
+	// usage and observation are authoritative, not additive billing snapshots.
+	if openAIUsageHasTokens(&wsResult.Usage) {
+		result.Usage = wsResult.Usage
 	}
+	result.ClientDisconnect = result.ClientDisconnect || wsResult.ClientDisconnect
+	result.UpstreamResponseModel = wsResult.UpstreamResponseModel
+	result.UpstreamResponseModelConflict = wsResult.UpstreamResponseModelConflict
+	result.UpstreamResponseServiceTier = wsResult.UpstreamResponseServiceTier
+	result.ServiceTier = wsResult.ServiceTier
 	result.UpstreamTerminalEvent = wsResult.UpstreamTerminalEvent
 }
 

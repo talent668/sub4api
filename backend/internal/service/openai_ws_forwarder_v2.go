@@ -558,6 +558,10 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 
 readLoop:
 	for {
+		if errors.Is(context.Cause(ctx), errOpenAIWSBridgeConverterStopped) {
+			lease.MarkBroken()
+			return resultWithUsage(), errOpenAIWSBridgeConverterStopped
+		}
 		markClientRequestCanceled()
 		var message []byte
 		var readErr error
@@ -602,6 +606,10 @@ readLoop:
 					pendingJSONDocuments = append(pendingJSONDocuments, documents[1:]...)
 				}
 			}
+		}
+		if errors.Is(context.Cause(ctx), errOpenAIWSBridgeConverterStopped) {
+			lease.MarkBroken()
+			return resultWithUsage(), errOpenAIWSBridgeConverterStopped
 		}
 		markClientRequestCanceled()
 		if readErr == nil && !json.Valid(message) {
@@ -781,7 +789,7 @@ readLoop:
 				emitStreamMessage(message, true)
 			}
 			if !reqStream {
-				writeWSJSONDownstream(c, sink, statusCode, gin.H{
+				c.JSON(statusCode, gin.H{
 					"error": gin.H{
 						"type":    "upstream_error",
 						"message": errMsg,
@@ -866,11 +874,7 @@ readLoop:
 			responseID = strings.TrimSpace(gjson.GetBytes(finalResponse, "id").String())
 		}
 
-		if sink != nil {
-			sink.WriteJSON(http.StatusOK, "application/json", finalResponse)
-		} else {
-			c.Data(http.StatusOK, "application/json", finalResponse)
-		}
+		c.Data(http.StatusOK, "application/json", finalResponse)
 	} else {
 		flushStreamWriter(true)
 	}
