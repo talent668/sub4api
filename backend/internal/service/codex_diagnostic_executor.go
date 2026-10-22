@@ -347,13 +347,13 @@ func CodexDiagnosticOutput(raw []byte) (string, bool) {
 		}
 		switch eventType {
 		case "response.output_text.delta":
-			output.WriteString(gjson.GetBytes(payload, "delta").String())
+			_, _ = output.WriteString(gjson.GetBytes(payload, "delta").String())
 		case "response.completed", "response.done":
 			terminal = true
 			status := gjson.GetBytes(payload, "response.status").String()
 			completed = status == "" || status == "completed"
 			if completed && output.Len() == 0 {
-				output.WriteString(codexDiagnosticResponseText(gjson.GetBytes(payload, "response")))
+				_, _ = output.WriteString(codexDiagnosticResponseText(gjson.GetBytes(payload, "response")))
 			}
 		case "error", "response.failed", "response.incomplete", "response.cancelled", "response.canceled":
 			terminal = true
@@ -376,7 +376,7 @@ func codexDiagnosticResponseText(response gjson.Result) string {
 	response.Get("output").ForEach(func(_, message gjson.Result) bool {
 		message.Get("content").ForEach(func(_, part gjson.Result) bool {
 			if part.Get("type").String() == "output_text" {
-				output.WriteString(part.Get("text").String())
+				_, _ = output.WriteString(part.Get("text").String())
 			}
 			return true
 		})
