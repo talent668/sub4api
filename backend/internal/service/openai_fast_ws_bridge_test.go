@@ -202,6 +202,7 @@ func TestOpenAIGatewayService_Forward_HTTPIngressKeepsHTTPForForcedDefaultTier(t
 func TestOpenAIGatewayService_Forward_HTTPIngressPassthroughAccountNotBridged(t *testing.T) {
 	cfg := newOpenAIWSV2TestConfig()
 	svc, upstream, dialer := newFastWSBridgeTestService(t, cfg, newFastWSBridgeTestCaptureConn(t))
+	useFastWSBridgeTestSSEUpstream(upstream)
 	c, _ := newFastWSBridgeTestGinContext(t)
 
 	body := []byte(`{"model":"gpt-6.1-sol","stream":false,"store":false,"instructions":"test","input":[{"type":"input_text","text":"hello"}]}`)
@@ -306,6 +307,21 @@ func (d *sequenceFastWSBridgeDialer) Dial(
 	return conn, 0, nil, nil
 }
 
+// useFastWSBridgeTestSSEUpstream makes the HTTP upstream answer with SSE: the
+// OAuth passthrough path forces stream=true and rejects a JSON body.
+func useFastWSBridgeTestSSEUpstream(upstream *httpUpstreamRecorder) {
+	upstream.resp = &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body: io.NopCloser(strings.NewReader(strings.Join([]string{
+			`data: {"type":"response.completed","response":{"id":"resp_passthrough_fast","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1}}}`,
+			"",
+			"data: [DONE]",
+			"",
+		}, "\n"))),
+	}
+}
+
 func useFastWSBridgeTestDialer(svc *OpenAIGatewayService, cfg *config.Config, dialer openAIWSClientDialer) {
 	pool := newOpenAIWSConnPool(cfg)
 	pool.setClientDialerForTest(dialer)
@@ -350,6 +366,7 @@ func TestOpenAIGatewayService_Forward_HTTPIngressFastBridgeFirstOutputTimeout(t 
 func TestOpenAIGatewayService_Forward_HTTPIngressPassthroughFlattenNamespacesNotBridged(t *testing.T) {
 	cfg := newOpenAIWSV2TestConfig()
 	svc, upstream, dialer := newFastWSBridgeTestService(t, cfg, newFastWSBridgeTestCaptureConn(t))
+	useFastWSBridgeTestSSEUpstream(upstream)
 	c, _ := newFastWSBridgeTestGinContext(t)
 	account := fastWSBridgeTestAccount(true, true)
 	account.Extra["openai_responses_flatten_namespaces"] = true
@@ -428,9 +445,11 @@ func TestOpenAIGatewayService_Forward_HTTPIngressFastBridgeFallbackKeepsWSRecove
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.False(t, result.OpenAIWSMode)
+	// The redial only happens after the WS recovery trimmed the rejected item.
+	// lastWrite is a shallow clone that shares the trimmed input items, so it
+	// cannot prove what the first attempt sent.
 	require.GreaterOrEqual(t, dialer.dialCount, 2, "WS recovery retries once before falling back")
 	require.NotNil(t, rejectConn.lastWrite)
-	require.Contains(t, requestToJSONString(rejectConn.lastWrite), "gAAA_rejected")
 	require.NotNil(t, upstream.lastReq)
 	require.NotContains(t, string(upstream.lastBody), "gAAA_rejected")
 	require.Equal(t, "hello", gjson.GetBytes(upstream.lastBody, `input.#(type=="input_text").text`).String())
