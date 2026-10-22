@@ -38,6 +38,9 @@ func AnthropicToResponsesWithMinOutputTokens(req *AnthropicRequest, minOutputTok
 		Stream:  req.Stream,
 		Include: []string{"reasoning.encrypted_content"},
 	}
+	if req.Speed == "fast" {
+		out.ServiceTier = "priority"
+	}
 
 	// Reasoning models (gpt-5.x) served via the Responses API do not accept
 	// sampling parameters. Sending temperature or top_p causes a 400
