@@ -476,6 +476,10 @@
                       {{ resultStatusLabel(result) }}
                     </span>
 
+                    <span v-if="result.http_status > 0" class="text-xs text-gray-500 dark:text-gray-400">
+                      HTTP {{ result.http_status }}
+                    </span>
+
                     <!-- Latency -->
                     <span v-if="result.latency_ms > 0" class="text-xs text-gray-500 dark:text-gray-400">
                       {{ result.latency_ms }}ms
@@ -494,8 +498,10 @@
                   <template v-if="isDiagnosticResult(result)">
                     <span v-if="result.predicted_model"> · {{ t('admin.scheduledTests.predictedModel') }} <span class="font-mono">{{ result.predicted_model }}</span></span>
                     <span v-if="result.probability != null"> · {{ formatProbability(result.probability) }}</span>
-                    <span v-if="result.reason"> · {{ result.reason }}</span>
                   </template>
+                </div>
+                <div v-if="result.reason" class="mt-1 break-words text-xs text-gray-500 dark:text-gray-400">
+                  {{ result.reason }}
                 </div>
 
                 <!-- Response / Error (collapsible) -->

@@ -1,15 +1,12 @@
 package service
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +20,62 @@ const codexDiagnosticRequestTimeout = 120 * time.Second
 
 const codexDiagnosticBodyLimit = 2 << 20
 
+var errCodexDiagnosticResponseTooLarge = errors.New("diagnostic response exceeds size limit")
+
+type codexDiagnosticRequestSourceKey struct{}
+
+type codexDiagnosticRequestSource struct {
+	remoteAddr string
+	host       string
+}
+
+// WithCodexDiagnosticRequestSource preserves the interactive caller's origin so
+// the normal gateway applies the same API-key IP restrictions as before.
+func WithCodexDiagnosticRequestSource(ctx context.Context, remoteAddr, host string) context.Context {
+	return context.WithValue(ctx, codexDiagnosticRequestSourceKey{}, codexDiagnosticRequestSource{remoteAddr, host})
+}
+
+// Bound memory while the gateway writes, not after it has buffered the response.
+// Flush is intentionally a no-op: probes consume the completed local response.
+type codexDiagnosticResponseWriter struct {
+	header   http.Header
+	body     bytes.Buffer
+	code     int
+	overflow bool
+	cancel   context.CancelFunc
+}
+
+func newCodexDiagnosticResponseWriter(cancel context.CancelFunc) *codexDiagnosticResponseWriter {
+	return &codexDiagnosticResponseWriter{header: make(http.Header), cancel: cancel}
+}
+
+func (w *codexDiagnosticResponseWriter) Header() http.Header { return w.header }
+
+func (w *codexDiagnosticResponseWriter) WriteHeader(code int) {
+	if w.code == 0 {
+		w.code = code
+	}
+}
+
+func (w *codexDiagnosticResponseWriter) Write(body []byte) (int, error) {
+	if w.overflow {
+		return 0, errCodexDiagnosticResponseTooLarge
+	}
+	w.WriteHeader(http.StatusOK)
+	remaining := codexDiagnosticBodyLimit - w.body.Len()
+	if len(body) > remaining {
+		n, _ := w.body.Write(body[:remaining])
+		w.overflow = true
+		if w.cancel != nil {
+			w.cancel()
+		}
+		return n, errCodexDiagnosticResponseTooLarge
+	}
+	return w.body.Write(body)
+}
+
+func (w *codexDiagnosticResponseWriter) Flush() { w.WriteHeader(http.StatusOK) }
+
 // CodexDiagnosticModelResult is the outcome of one model probe.
 type CodexDiagnosticModelResult struct {
 	Model            string
@@ -35,6 +88,8 @@ type CodexDiagnosticModelResult struct {
 	GatewayErrorCode string
 	ModelReply       string
 	LatencyMs        int64
+	StartedAt        time.Time
+	FinishedAt       time.Time
 }
 
 // CodexDiagnosticExecutor runs the Codex degradation diagnostic through the
@@ -147,9 +202,15 @@ func (e *CodexDiagnosticExecutor) probeModel(
 	result *CodexDiagnosticModelResult,
 ) {
 	startedAt := time.Now()
-	defer func() { result.LatencyMs = time.Since(startedAt).Milliseconds() }()
+	result.StartedAt = startedAt
+	defer func() {
+		result.FinishedAt = time.Now()
+		result.LatencyMs = result.FinishedAt.Sub(startedAt).Milliseconds()
+	}()
+	modelCtx, cancel := context.WithTimeout(ctx, codexDiagnosticRequestTimeout)
+	defer cancel()
 
-	probeCtx, err := e.gateway.PrepareCodexProbeContext(ctx)
+	probeCtx, err := e.gateway.PrepareCodexProbeContext(modelCtx)
 	if err != nil {
 		result.Reason = "template_unavailable"
 		if errors.Is(err, ErrCodexProbeTemplateInvalid) {
@@ -171,10 +232,8 @@ func (e *CodexDiagnosticExecutor) probeModel(
 		return
 	}
 
-	modelCtx, cancel := context.WithTimeout(WithCodexTicketDiagnostic(probeCtx, accountID), codexDiagnosticRequestTimeout)
-	request, err := http.NewRequestWithContext(modelCtx, http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	request, err := http.NewRequestWithContext(WithCodexTicketDiagnostic(probeCtx, accountID), http.MethodPost, "/v1/responses", bytes.NewReader(body))
 	if err != nil {
-		cancel()
 		result.Reason = "request_build_failed"
 		return
 	}
@@ -186,24 +245,32 @@ func (e *CodexDiagnosticExecutor) probeModel(
 	request.Header.Set("Accept", "text/event-stream")
 	request.RemoteAddr = "127.0.0.1:0"
 	request.Host = "localhost"
+	if source, ok := ctx.Value(codexDiagnosticRequestSourceKey{}).(codexDiagnosticRequestSource); ok {
+		request.RemoteAddr = source.remoteAddr
+		request.Host = source.host
+	}
 
-	writer := httptest.NewRecorder()
+	writer := newCodexDiagnosticResponseWriter(cancel)
 	router.ServeHTTP(writer, request)
-	cancel()
-
-	result.HTTPStatus = writer.Code
-	if writer.Code < 200 || writer.Code >= 300 {
+	result.HTTPStatus = writer.code
+	if writer.overflow {
+		result.Reason = "response_too_large"
+		return
+	}
+	if modelCtx.Err() != nil {
+		result.Reason = "request_canceled"
+		if errors.Is(modelCtx.Err(), context.DeadlineExceeded) {
+			result.Reason = "request_timeout"
+		}
+		return
+	}
+	if writer.code < 200 || writer.code >= 300 {
 		result.Reason = "gateway_request_failed"
-		result.GatewayErrorCode = CodexDiagnosticGatewayError(writer.Body.Bytes())
+		result.GatewayErrorCode = CodexDiagnosticGatewayError(writer.body.Bytes())
 		return
 	}
 
-	output, readErr := io.ReadAll(io.LimitReader(writer.Body, codexDiagnosticBodyLimit))
-	if readErr != nil {
-		result.Reason = "response_read_failed"
-		return
-	}
-	diagnosticText, complete := CodexDiagnosticOutput(output)
+	diagnosticText, complete := CodexDiagnosticOutput(writer.body.Bytes())
 	if !complete {
 		result.Reason = "response_incomplete"
 		return
@@ -229,10 +296,11 @@ func (e *CodexDiagnosticExecutor) probeModel(
 func truncateScheduledDiagnosticReply(text string) string {
 	const maxReplyChars = 500
 	text = strings.TrimSpace(text)
-	if len(text) <= maxReplyChars {
+	runes := []rune(text)
+	if len(runes) <= maxReplyChars {
 		return text
 	}
-	return text[:maxReplyChars]
+	return string(runes[:maxReplyChars])
 }
 
 // CodexDiagnosticGatewayError extracts a safe diagnostic error code from a
@@ -265,49 +333,54 @@ func CodexDiagnosticGatewayError(raw []byte) string {
 func CodexDiagnosticOutput(raw []byte) (string, bool) {
 	completed := false
 	streamed := false
+	terminal := false
+	valid := true
 	var output strings.Builder
-	scanner := bufio.NewScanner(bytes.NewReader(raw))
-	scanner.Buffer(make([]byte, 4096), codexDiagnosticBodyLimit)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if payload == "[DONE]" {
-			continue
-		}
+	forEachOpenAISSEFrame(string(raw), func(eventType string, payload []byte) {
 		streamed = true
-		switch gjson.Get(payload, "type").String() {
-		case "response.output_text.delta":
-			_, _ = output.WriteString(gjson.Get(payload, "delta").String())
-		case "response.completed":
-			completed = true
-			if output.Len() == 0 {
-				gjson.Get(payload, "response.output").ForEach(func(_, message gjson.Result) bool {
-					message.Get("content").ForEach(func(_, part gjson.Result) bool {
-						if part.Get("type").String() == "output_text" {
-							_, _ = output.WriteString(part.Get("text").String())
-						}
-						return true
-					})
-					return true
-				})
-			}
+		if terminal {
+			return
 		}
-	}
+		if !gjson.ValidBytes(payload) {
+			valid = false
+			return
+		}
+		switch eventType {
+		case "response.output_text.delta":
+			output.WriteString(gjson.GetBytes(payload, "delta").String())
+		case "response.completed", "response.done":
+			terminal = true
+			status := gjson.GetBytes(payload, "response.status").String()
+			completed = status == "" || status == "completed"
+			if completed && output.Len() == 0 {
+				output.WriteString(codexDiagnosticResponseText(gjson.GetBytes(payload, "response")))
+			}
+		case "error", "response.failed", "response.incomplete", "response.cancelled", "response.canceled":
+			terminal = true
+		}
+	})
 	if streamed {
-		return output.String(), completed && scanner.Err() == nil
+		return output.String(), completed && valid
 	}
-	var body map[string]any
-	if json.Unmarshal(raw, &body) != nil {
+	if !json.Valid(raw) || gjson.GetBytes(raw, "status").String() != "completed" {
 		return "", false
 	}
-	if gjson.GetBytes(raw, "status").String() != "completed" {
-		return "", false
+	return codexDiagnosticResponseText(gjson.ParseBytes(raw)), true
+}
+
+func codexDiagnosticResponseText(response gjson.Result) string {
+	if text := response.Get("output_text").String(); text != "" {
+		return text
 	}
-	if text := gjson.GetBytes(raw, "output_text").String(); text != "" {
-		return text, true
-	}
-	return gjson.GetBytes(raw, "output.0.content.0.text").String(), true
+	var output strings.Builder
+	response.Get("output").ForEach(func(_, message gjson.Result) bool {
+		message.Get("content").ForEach(func(_, part gjson.Result) bool {
+			if part.Get("type").String() == "output_text" {
+				output.WriteString(part.Get("text").String())
+			}
+			return true
+		})
+		return true
+	})
+	return output.String()
 }

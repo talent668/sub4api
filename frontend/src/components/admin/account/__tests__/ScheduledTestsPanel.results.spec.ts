@@ -69,6 +69,26 @@ describe('scheduled test result selection', () => {
     expect(wrapper.text()).not.toContain('common.loading')
   })
 
+  it.each([
+    { status: 'normal', http_status: 200, model_id: 'gpt-5.4', reason: 'model_match' },
+    { status: 'failed', http_status: 403, model_id: 'gpt-5.4', reason: 'gateway_http_error:MODEL_NOT_ALLOWED' },
+    { status: 'failed', http_status: 0, model_id: '', reason: 'api_key_unavailable' },
+  ])('shows actual HTTP status and reason for $status results ($http_status)', async details => {
+    listResults.mockResolvedValueOnce([{ ...result(11), ...details }])
+    const wrapper = await openPanel()
+    await wrapper.findAll('.cursor-pointer')[0].trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain(details.reason)
+    if (details.http_status > 0) {
+      expect(wrapper.text()).toContain(`HTTP ${details.http_status}`)
+    } else {
+      expect(wrapper.text()).not.toContain('HTTP ')
+    }
+    expect(wrapper.text()).toContain(details.status === 'normal'
+      ? 'admin.scheduledTests.statusNormal'
+      : 'admin.scheduledTests.failed')
+  })
+
   it('invalidates a request when the same plan is collapsed and reopened', async () => {
     const old = deferred<ReturnType<typeof result>[]>()
     listResults.mockReturnValueOnce(old.promise).mockResolvedValueOnce([result(22)])

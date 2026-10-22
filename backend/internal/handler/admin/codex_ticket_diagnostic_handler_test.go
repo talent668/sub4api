@@ -143,6 +143,24 @@ func TestCodexDiagnosticChallengeRequestAndValidationUseSameDraw(t *testing.T) {
 	}
 }
 
+func TestCodexDiagnosticPreservesInteractiveRequestSource(t *testing.T) {
+	calls := 0
+	handler, client, writer := newCodexChallengeDiagnosticHandler(t, []string{"gpt-5.4"}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		require.Equal(t, "198.51.100.27:4567", r.RemoteAddr)
+		require.Equal(t, "admin.example.test", r.Host)
+		_, err := fmt.Fprint(w, `{"status":"completed","output_text":"1"}`)
+		require.NoError(t, err)
+	}))
+	client.Request.RemoteAddr = "198.51.100.27:4567"
+	client.Request.Host = "admin.example.test"
+	handler.diagnoseCodexModels(client, func() (service.ModelTraceChallenge, error) {
+		return service.ModelTraceChallenge{Prompt: "diagnostic challenge", ExpectedCount: 292}, nil
+	})
+	require.Equal(t, http.StatusOK, writer.Code, writer.Body.String())
+	require.Equal(t, 1, calls)
+}
+
 func TestCodexDiagnosticChallengeGenerationFailureDoesNotSendRequest(t *testing.T) {
 	handler, client, writer := newCodexChallengeDiagnosticHandler(t, []string{"gpt-5.4"}, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Fatal("failed challenge must not enter the gateway")

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/MACOS-DO/sub4api/internal/pkg/response"
 	"github.com/MACOS-DO/sub4api/internal/service"
@@ -13,11 +14,12 @@ import (
 // ScheduledTestHandler handles admin scheduled-test-plan management.
 type ScheduledTestHandler struct {
 	scheduledTestSvc *service.ScheduledTestService
+	apiKeySvc        *service.APIKeyService
 }
 
 // NewScheduledTestHandler creates a new ScheduledTestHandler.
-func NewScheduledTestHandler(scheduledTestSvc *service.ScheduledTestService) *ScheduledTestHandler {
-	return &ScheduledTestHandler{scheduledTestSvc: scheduledTestSvc}
+func NewScheduledTestHandler(scheduledTestSvc *service.ScheduledTestService, apiKeySvc *service.APIKeyService) *ScheduledTestHandler {
+	return &ScheduledTestHandler{scheduledTestSvc: scheduledTestSvc, apiKeySvc: apiKeySvc}
 }
 
 type createScheduledTestPlanRequest struct {
@@ -63,6 +65,14 @@ func validateScheduledDiagnosticModels(models []string) error {
 	return nil
 }
 
+func (h *ScheduledTestHandler) authorizeDiagnosticPlan(c *gin.Context, plan *service.ScheduledTestPlan) bool {
+	if plan.APIKeyID == nil || *plan.APIKeyID <= 0 {
+		response.BadRequest(c, "api_key_id is required for codex diagnostic plans")
+		return false
+	}
+	return authorizeCodexDiagnosticAPIKey(c, h.apiKeySvc, *plan.APIKeyID)
+}
+
 // ListByAccount GET /admin/accounts/:id/scheduled-test-plans
 func (h *ScheduledTestHandler) ListByAccount(c *gin.Context) {
 	accountID, err := strconv.ParseInt(c.Param("id"), 10, 64)
@@ -89,7 +99,7 @@ func (h *ScheduledTestHandler) Create(c *gin.Context) {
 
 	plan := &service.ScheduledTestPlan{
 		AccountID:      req.AccountID,
-		TestType:       req.TestType,
+		TestType:       strings.ToLower(strings.TrimSpace(req.TestType)),
 		ModelID:        req.ModelID,
 		Models:         req.Models,
 		APIKeyID:       req.APIKeyID,
@@ -105,6 +115,10 @@ func (h *ScheduledTestHandler) Create(c *gin.Context) {
 	}
 	if err := validateScheduledDiagnosticModels(req.Models); err != nil {
 		response.BadRequest(c, err.Error())
+		return
+	}
+
+	if plan.TestType == service.ScheduledTestTypeCodexDiagnostic && !h.authorizeDiagnosticPlan(c, plan) {
 		return
 	}
 
@@ -136,8 +150,14 @@ func (h *ScheduledTestHandler) Update(c *gin.Context) {
 		return
 	}
 
+	// Work on a copy so rejected changes cannot mutate the loaded plan.
+	plan := *existing
+	existing = &plan
+	previousType := strings.ToLower(strings.TrimSpace(existing.TestType))
+	previousKeyID := existing.APIKeyID
+
 	if req.TestType != "" {
-		existing.TestType = req.TestType
+		existing.TestType = strings.ToLower(strings.TrimSpace(req.TestType))
 	}
 	if req.ModelID != "" {
 		existing.ModelID = req.ModelID
@@ -163,6 +183,15 @@ func (h *ScheduledTestHandler) Update(c *gin.Context) {
 	}
 	if req.AutoRecover != nil {
 		existing.AutoRecover = *req.AutoRecover
+	}
+
+	keyChanged := req.APIKeyID != nil && (previousKeyID == nil || *req.APIKeyID != *previousKeyID)
+	// Every enabled diagnostic update must authorize its billing key, including
+	// edits to older plans. Disabled plans may keep an unavailable original key.
+	if strings.ToLower(strings.TrimSpace(existing.TestType)) == service.ScheduledTestTypeCodexDiagnostic &&
+		(existing.Enabled || previousType != service.ScheduledTestTypeCodexDiagnostic || keyChanged) &&
+		!h.authorizeDiagnosticPlan(c, existing) {
+		return
 	}
 
 	updated, err := h.scheduledTestSvc.UpdatePlan(c.Request.Context(), existing)

@@ -63,7 +63,10 @@ func (s *ScheduledTestService) ListPlansByAccount(ctx context.Context, accountID
 
 // UpdatePlan validates cron and updates the plan.
 func (s *ScheduledTestService) UpdatePlan(ctx context.Context, plan *ScheduledTestPlan) (*ScheduledTestPlan, error) {
-	if err := normalizeScheduledTestPlan(plan); err != nil {
+	// A deleted billing key is SET NULL by the FK. Keep existing plans
+	// disableable without allowing creation or activation of an invalid plan.
+	allowMissingKey := plan != nil && plan.ID > 0 && !plan.Enabled
+	if err := normalizeScheduledTestPlanWithOptions(plan, allowMissingKey); err != nil {
 		return nil, err
 	}
 	nextRun, err := computeNextRun(plan.CronExpression, time.Now())
@@ -109,6 +112,10 @@ func computeNextRun(cronExpr string, from time.Time) (time.Time, error) {
 // persisted. Connectivity tests keep the legacy single-model contract while
 // Codex diagnostic plans carry a billing API key and a model list.
 func normalizeScheduledTestPlan(plan *ScheduledTestPlan) error {
+	return normalizeScheduledTestPlanWithOptions(plan, false)
+}
+
+func normalizeScheduledTestPlanWithOptions(plan *ScheduledTestPlan, allowMissingKey bool) error {
 	if plan == nil {
 		return errors.New("plan is nil")
 	}
@@ -123,7 +130,7 @@ func normalizeScheduledTestPlan(plan *ScheduledTestPlan) error {
 		plan.Models = nil
 		plan.APIKeyID = nil
 	case ScheduledTestTypeCodexDiagnostic:
-		if plan.APIKeyID == nil || *plan.APIKeyID <= 0 {
+		if (plan.APIKeyID == nil || *plan.APIKeyID <= 0) && !allowMissingKey {
 			return errors.New("api_key_id is required for codex diagnostic plans")
 		}
 		models := make([]string, 0, len(plan.Models))

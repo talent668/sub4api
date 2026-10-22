@@ -39,6 +39,24 @@ func codexDiagnosticOutput(raw []byte) (string, bool) {
 	return service.CodexDiagnosticOutput(raw)
 }
 
+// authorizeCodexDiagnosticAPIKey applies the same billing-key boundary to
+// interactive diagnostics and scheduled diagnostic plan changes.
+func authorizeCodexDiagnosticAPIKey(c *gin.Context, keys *service.APIKeyService, keyID int64) bool {
+	subject, authorized := middleware.GetAuthSubjectFromContext(c)
+	if !authorized || subject.UserID <= 0 {
+		response.ErrorWithDetails(c, http.StatusForbidden, "Admin user required", "FORBIDDEN", nil)
+		return false
+	}
+	if keys != nil {
+		key, err := keys.GetByID(c.Request.Context(), keyID)
+		if err == nil && key != nil && key.UserID == subject.UserID && key.IsActive() && !key.IsExpired() && !key.IsQuotaExhausted() && key.Key != "" {
+			return true
+		}
+	}
+	response.ErrorWithDetails(c, http.StatusForbidden, "API key unavailable or not owned by this admin", "API_KEY_UNAVAILABLE", nil)
+	return false
+}
+
 func (h *AccountHandler) DiagnoseCodexModels(c *gin.Context) {
 	h.diagnoseCodexModels(c, service.NewModelTraceChallenge)
 }
@@ -60,14 +78,7 @@ func (h *AccountHandler) diagnoseCodexModels(c *gin.Context, generateChallenge f
 		response.BadRequest(c, "Select an API key and up to 32 models")
 		return
 	}
-	subject, authorized := middleware.GetAuthSubjectFromContext(c)
-	if !authorized || subject.UserID <= 0 {
-		response.ErrorWithDetails(c, http.StatusForbidden, "Admin user required", "FORBIDDEN", nil)
-		return
-	}
-	key, err := h.codexTicketAPIKeys.GetByID(c.Request.Context(), input.APIKeyID)
-	if err != nil || key == nil || key.UserID != subject.UserID || !key.IsActive() || key.IsExpired() || key.IsQuotaExhausted() || key.Key == "" {
-		response.ErrorWithDetails(c, http.StatusForbidden, "API key unavailable or not owned by this admin", "API_KEY_UNAVAILABLE", nil)
+	if !authorizeCodexDiagnosticAPIKey(c, h.codexTicketAPIKeys, input.APIKeyID) {
 		return
 	}
 	allowed, err := service.ModelTraceGPTModels()
@@ -92,7 +103,7 @@ func (h *AccountHandler) diagnoseCodexModels(c *gin.Context, generateChallenge f
 		response.ErrorWithDetails(c, http.StatusServiceUnavailable, "Codex diagnostic unavailable", "CODEX_DIAGNOSTIC_UNAVAILABLE", nil)
 		return
 	}
-	runResults, runErr := executor.Run(c.Request.Context(), accountID, input.APIKeyID, input.Models, generateChallenge)
+	runResults, runErr := executor.Run(service.WithCodexDiagnosticRequestSource(c.Request.Context(), c.Request.RemoteAddr, c.Request.Host), accountID, input.APIKeyID, input.Models, generateChallenge)
 	if runErr != nil {
 		response.ErrorWithDetails(c, http.StatusBadRequest, runErr.Error(), "CODEX_DIAGNOSTIC_FAILED", nil)
 		return

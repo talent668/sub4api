@@ -10,7 +10,10 @@ import (
 	"github.com/robfig/cron/v3"
 )
 
-const scheduledTestDefaultMaxWorkers = 10
+const (
+	scheduledTestDefaultMaxWorkers = 10
+	scheduledTestFinalizeTimeout   = 15 * time.Second
+)
 
 // ScheduledTestRunnerService periodically scans due test plans and executes them.
 type ScheduledTestRunnerService struct {
@@ -24,6 +27,12 @@ type ScheduledTestRunnerService struct {
 	cron      *cron.Cron
 	startOnce sync.Once
 	stopOnce  sync.Once
+
+	// Serialize scans and claims with completion so a stale ListDue snapshot
+	// cannot reclaim a plan just as its previous execution finishes.
+	scanMu   sync.Mutex
+	inflight map[int64]struct{}
+	workers  chan struct{}
 }
 
 // NewScheduledTestRunnerService creates a new runner.
@@ -94,32 +103,85 @@ func (s *ScheduledTestRunnerService) runScheduled() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	now := time.Now()
-	plans, err := s.planRepo.ListDue(ctx, now)
+	s.runScheduledBatch(ctx)
+}
+
+// runScheduledBatch scans and executes due plans without the cron tick delay.
+func (s *ScheduledTestRunnerService) runScheduledBatch(ctx context.Context) {
+	// Overlapping ticks need not queue another scan. Keep the lock until all
+	// due plans are claimed; completion uses this same lock before releasing a
+	// claim, preventing a stale scan from re-running a just-finished plan.
+	if !s.scanMu.TryLock() {
+		return
+	}
+	if ctx.Err() != nil {
+		s.scanMu.Unlock()
+		return
+	}
+	plans, err := s.planRepo.ListDue(ctx, time.Now())
 	if err != nil {
+		s.scanMu.Unlock()
 		logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] ListDue error: %v", err)
 		return
 	}
-	if len(plans) == 0 {
+	if s.inflight == nil {
+		s.inflight = make(map[int64]struct{})
+	}
+	if s.workers == nil {
+		s.workers = make(chan struct{}, scheduledTestDefaultMaxWorkers)
+	}
+	workers := s.workers
+	claimed := make([]*ScheduledTestPlan, 0, len(plans))
+	for _, plan := range plans {
+		if plan == nil {
+			continue
+		}
+		if _, running := s.inflight[plan.ID]; running {
+			continue
+		}
+		s.inflight[plan.ID] = struct{}{}
+		claimed = append(claimed, plan)
+	}
+	s.scanMu.Unlock()
+	if len(claimed) == 0 {
 		return
 	}
 
-	logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] found %d due plans", len(plans))
-
-	sem := make(chan struct{}, scheduledTestDefaultMaxWorkers)
+	logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] found %d due plans", len(claimed))
 	var wg sync.WaitGroup
-
-	for _, plan := range plans {
-		sem <- struct{}{}
+	launched := 0
+dispatch:
+	for _, plan := range claimed {
+		select {
+		case workers <- struct{}{}:
+		case <-ctx.Done():
+			break dispatch
+		}
+		// A ready worker and cancellation can race in the select above.
+		if ctx.Err() != nil {
+			<-workers
+			break
+		}
+		launched++
 		wg.Add(1)
 		go func(p *ScheduledTestPlan) {
 			defer wg.Done()
-			defer func() { <-sem }()
+			defer s.releasePlan(p.ID)
+			defer func() { <-workers }()
 			s.runOnePlan(ctx, p)
 		}(plan)
 	}
-
+	// Plans that never obtained a worker remain due for a later tick.
+	for _, plan := range claimed[launched:] {
+		s.releasePlan(plan.ID)
+	}
 	wg.Wait()
+}
+
+func (s *ScheduledTestRunnerService) releasePlan(id int64) {
+	s.scanMu.Lock()
+	delete(s.inflight, id)
+	s.scanMu.Unlock()
 }
 
 func (s *ScheduledTestRunnerService) runOnePlan(ctx context.Context, plan *ScheduledTestPlan) {
@@ -135,9 +197,11 @@ func (s *ScheduledTestRunnerService) runOnePlan(ctx context.Context, plan *Sched
 		return
 	}
 
-	if err := s.scheduledSvc.SaveResult(ctx, plan.ID, plan.MaxResults, result); err != nil {
+	finalCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduledTestFinalizeTimeout)
+	if err := s.scheduledSvc.SaveResult(finalCtx, plan.ID, plan.MaxResults, result); err != nil {
 		logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] plan=%d SaveResult error: %v", plan.ID, err)
 	}
+	cancel()
 
 	// Auto-recover account if test succeeded and auto_recover is enabled.
 	if result.Status == "success" && plan.AutoRecover {
@@ -157,20 +221,36 @@ func (s *ScheduledTestRunnerService) runDiagnosticPlan(ctx context.Context, plan
 	}
 	startedAt := time.Now()
 	if plan.APIKeyID == nil || *plan.APIKeyID <= 0 || len(plan.Models) == 0 {
-		s.saveDiagnosticFailure(ctx, plan, "", "invalid_plan", "diagnostic plan is missing api_key_id or models", startedAt)
+		finalCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduledTestFinalizeTimeout)
+		defer cancel()
+		s.saveDiagnosticFailure(finalCtx, plan, "", "invalid_plan", "diagnostic plan is missing api_key_id or models", startedAt)
 		return
 	}
 	results, err := s.diagnostic.Run(ctx, plan.AccountID, *plan.APIKeyID, plan.Models, nil)
+	// Probes keep the batch's execution budget, but completed work must survive
+	// its cancellation. Keep values (tracing, etc.) and bound all result writes.
+	finalCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduledTestFinalizeTimeout)
+	defer cancel()
 	if err != nil {
 		logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] plan=%d diagnostic error: %v", plan.ID, err)
-		for _, model := range plan.Models {
-			s.saveDiagnosticFailure(ctx, plan, model, "diagnostic_unavailable", err.Error(), startedAt)
+		if len(results) == 0 {
+			for _, model := range plan.Models {
+				s.saveDiagnosticFailure(finalCtx, plan, model, "diagnostic_unavailable", err.Error(), startedAt)
+			}
+			return
 		}
-		return
+		// A partial result plus cancellation is not a setup failure. Preserve
+		// returned probes and don't invent failures for unprobed models.
 	}
 	for _, modelResult := range results {
-		finishedAt := time.Now()
-		started := finishedAt.Add(-time.Duration(modelResult.LatencyMs) * time.Millisecond)
+		finishedAt := modelResult.FinishedAt
+		if finishedAt.IsZero() {
+			finishedAt = time.Now()
+		}
+		started := modelResult.StartedAt
+		if started.IsZero() {
+			started = finishedAt.Add(-time.Duration(modelResult.LatencyMs) * time.Millisecond)
+		}
 		status := modelResult.Status
 		if status == "" {
 			status = ScheduledDiagnosticStatusFailed
@@ -198,7 +278,7 @@ func (s *ScheduledTestRunnerService) runDiagnosticPlan(ctx context.Context, plan
 			StartedAt:      started,
 			FinishedAt:     finishedAt,
 		}
-		if saveErr := s.scheduledSvc.SaveResult(ctx, plan.ID, plan.MaxResults, entry); saveErr != nil {
+		if saveErr := s.scheduledSvc.SaveResult(finalCtx, plan.ID, plan.MaxResults, entry); saveErr != nil {
 			logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] plan=%d SaveResult error: %v", plan.ID, saveErr)
 		}
 	}
@@ -222,13 +302,18 @@ func (s *ScheduledTestRunnerService) saveDiagnosticFailure(ctx context.Context, 
 
 // advancePlan schedules the next run for a plan.
 func (s *ScheduledTestRunnerService) advancePlan(ctx context.Context, plan *ScheduledTestPlan) {
-	nextRun, err := computeNextRun(plan.CronExpression, time.Now())
+	// Give schedule advancement its own bounded window even if probe execution
+	// or result persistence exhausted their deadlines.
+	finalCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduledTestFinalizeTimeout)
+	defer cancel()
+	now := time.Now()
+	nextRun, err := computeNextRun(plan.CronExpression, now)
 	if err != nil {
 		logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] plan=%d computeNextRun error: %v", plan.ID, err)
 		return
 	}
 
-	if err := s.planRepo.UpdateAfterRun(ctx, plan.ID, time.Now(), nextRun); err != nil {
+	if err := s.planRepo.UpdateAfterRun(finalCtx, plan.ID, now, nextRun); err != nil {
 		logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] plan=%d UpdateAfterRun error: %v", plan.ID, err)
 	}
 }
