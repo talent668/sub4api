@@ -1077,6 +1077,16 @@ export default {
         saved: '过载冷却设置保存成功',
         saveFailed: '保存过载冷却设置失败'
       },
+      openaiFastBridge: {
+        title: 'Fast WS 桥接',
+        description: '控制 HTTP/SSE 入站的 Fast / Ultra Fast 请求是否改走上游 Responses WebSocket',
+        enabled: '启用 Fast WS 桥接',
+        enabledHint: '仅对 ChatGPT OAuth/Codex 账号的 priority/ultrafast 请求生效；普通请求不受影响',
+        note: '默认关闭。HTTP 上游的 Fast 在部分环境下也可直接生效；只有确认 HTTP 未生效或需要对齐官方 WS 行为时再开启。',
+        saved: 'Fast WS 桥接设置保存成功',
+        saveFailed: '保存 Fast WS 桥接设置失败',
+        loadFailed: '加载 Fast WS 桥接设置失败'
+      },
       rateLimit429Cooldown: {
         title: '429 默认回避',
         description: '配置上游返回 429 且没有明确重置时间时的默认账号回避策略',

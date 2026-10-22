@@ -715,6 +715,39 @@ func (s *SettingService) SetOverloadCooldownSettings(ctx context.Context, settin
 	return s.settingRepo.Set(ctx, SettingKeyOverloadCooldownSettings, string(data))
 }
 
+// GetOpenAIFastBridgeSettings 获取 HTTP fast -> WS 桥接开关（web 控制，默认关闭）
+func (s *SettingService) GetOpenAIFastBridgeSettings(ctx context.Context) (*OpenAIFastBridgeSettings, error) {
+	value, err := s.settingRepo.GetValue(ctx, SettingKeyOpenAIFastBridgeSettings)
+	if err != nil {
+		if errors.Is(err, ErrSettingNotFound) {
+			return DefaultOpenAIFastBridgeSettings(), nil
+		}
+		return nil, fmt.Errorf("get openai fast bridge settings: %w", err)
+	}
+	if value == "" {
+		return DefaultOpenAIFastBridgeSettings(), nil
+	}
+
+	var settings OpenAIFastBridgeSettings
+	if err := json.Unmarshal([]byte(value), &settings); err != nil {
+		return DefaultOpenAIFastBridgeSettings(), nil
+	}
+	settings.Configured = true
+	return &settings, nil
+}
+
+// SetOpenAIFastBridgeSettings 设置 HTTP fast -> WS 桥接开关
+func (s *SettingService) SetOpenAIFastBridgeSettings(ctx context.Context, settings *OpenAIFastBridgeSettings) error {
+	if settings == nil {
+		return fmt.Errorf("settings cannot be nil")
+	}
+	data, err := json.Marshal(settings)
+	if err != nil {
+		return fmt.Errorf("marshal openai fast bridge settings: %w", err)
+	}
+	return s.settingRepo.Set(ctx, SettingKeyOpenAIFastBridgeSettings, string(data))
+}
+
 // GetRateLimit429CooldownSettings 获取429默认回避配置
 func (s *SettingService) GetRateLimit429CooldownSettings(ctx context.Context) (*RateLimit429CooldownSettings, error) {
 	value, err := s.settingRepo.GetValue(ctx, SettingKeyRateLimit429CooldownSettings)

@@ -1330,6 +1330,32 @@ export async function updateOverloadCooldownSettings(
   return data;
 }
 
+// ==================== OpenAI Fast Bridge Settings ====================
+
+/**
+ * Opt-in HTTP/SSE Fast request bridge to the upstream Responses WebSocket.
+ */
+export interface OpenAIFastBridgeSettings {
+  enabled: boolean;
+}
+
+export async function getOpenAIFastBridgeSettings(): Promise<OpenAIFastBridgeSettings> {
+  const { data } = await apiClient.get<OpenAIFastBridgeSettings>(
+    "/admin/settings/openai-fast-bridge",
+  );
+  return data;
+}
+
+export async function updateOpenAIFastBridgeSettings(
+  settings: OpenAIFastBridgeSettings,
+): Promise<OpenAIFastBridgeSettings> {
+  const { data } = await apiClient.put<OpenAIFastBridgeSettings>(
+    "/admin/settings/openai-fast-bridge",
+    settings,
+  );
+  return data;
+}
+
 // ==================== 429 Rate Limit Cooldown Settings ====================
 
 export interface RateLimit429CooldownSettings {

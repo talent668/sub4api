@@ -613,6 +613,20 @@ func DefaultOpenAIAPIKeyHealthBreakerSettings() *OpenAIAPIKeyHealthBreakerSettin
 	}
 }
 
+// OpenAIFastBridgeSettings controls the optional HTTP/SSE Fast request bridge
+// to the upstream Responses WebSocket. It is web-controlled and defaults off.
+type OpenAIFastBridgeSettings struct {
+	Enabled bool `json:"enabled"`
+	// Configured is true only when a stored web setting exists; it lets the
+	// gateway fall back to the YAML/env switch when the DB row is absent.
+	Configured bool `json:"-"`
+}
+
+// DefaultOpenAIFastBridgeSettings returns the conservative default (disabled).
+func DefaultOpenAIFastBridgeSettings() *OpenAIFastBridgeSettings {
+	return &OpenAIFastBridgeSettings{Enabled: false}
+}
+
 // DefaultOverloadCooldownSettings 返回默认的过载冷却配置（启用，10分钟）
 func DefaultOverloadCooldownSettings() *OverloadCooldownSettings {
 	return &OverloadCooldownSettings{

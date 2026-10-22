@@ -1083,6 +1083,16 @@ export default {
         saved: 'Overload cooldown settings saved',
         saveFailed: 'Failed to save overload cooldown settings'
       },
+      openaiFastBridge: {
+        title: 'Fast WS Bridge',
+        description: 'Control whether HTTP/SSE Fast / Ultra Fast requests are switched to the upstream Responses WebSocket',
+        enabled: 'Enable Fast WS Bridge',
+        enabledHint: 'Only applies to priority/ultrafast requests on ChatGPT OAuth/Codex accounts; normal requests are unaffected',
+        note: 'Disabled by default. Fast can also take effect over HTTP in some environments; enable this only when HTTP Fast does not take effect or official WS parity is required.',
+        saved: 'Fast WS bridge settings saved',
+        saveFailed: 'Failed to save Fast WS bridge settings',
+        loadFailed: 'Failed to load Fast WS bridge settings'
+      },
       rateLimit429Cooldown: {
         title: '429 Default Cooldown',
         description: 'Configure the default account cooldown when upstream returns 429 without an explicit reset time',

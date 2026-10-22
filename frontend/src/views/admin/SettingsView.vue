@@ -203,6 +203,7 @@
 
         <!-- Tab: Gateway -->
         <div v-show="activeTab === 'gateway'" class="space-y-6">
+          <OpenAIFastBridgeSettings />
           <!-- Overload Cooldown (529) Settings -->
           <div class="card">
             <div
@@ -9009,6 +9010,7 @@
 
 <script setup lang="ts">
 import CodexTicketCadenceSettings from '@/components/admin/account/CodexTicketCadenceSettings.vue'
+import OpenAIFastBridgeSettings from '@/components/admin/settings/OpenAIFastBridgeSettings.vue'
 import { ref, reactive, computed, onMounted, watch } from "vue";
 import { listPlatformIds } from "@/constants/platformCatalog";
 import { useI18n } from "vue-i18n";

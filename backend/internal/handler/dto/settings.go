@@ -470,6 +470,11 @@ type OverloadCooldownSettings struct {
 	CooldownMinutes int  `json:"cooldown_minutes"`
 }
 
+// OpenAIFastBridgeSettings controls the optional HTTP fast -> WS upstream bridge.
+type OpenAIFastBridgeSettings struct {
+	Enabled bool `json:"enabled"`
+}
+
 // RateLimit429CooldownSettings 429默认回避配置 DTO
 type RateLimit429CooldownSettings struct {
 	Enabled         bool `json:"enabled"`

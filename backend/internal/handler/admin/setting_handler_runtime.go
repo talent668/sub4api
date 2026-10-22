@@ -102,6 +102,43 @@ func (h *SettingHandler) UpdateOverloadCooldownSettings(c *gin.Context) {
 	})
 }
 
+// GetOpenAIFastBridgeSettings 获取 HTTP fast -> WS 桥接开关
+// GET /api/v1/admin/settings/openai-fast-bridge
+func (h *SettingHandler) GetOpenAIFastBridgeSettings(c *gin.Context) {
+	settings, err := h.settingService.GetOpenAIFastBridgeSettings(c.Request.Context())
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, dto.OpenAIFastBridgeSettings{Enabled: settings.Enabled})
+}
+
+// UpdateOpenAIFastBridgeSettingsRequest 更新 HTTP fast -> WS 桥接开关请求
+type UpdateOpenAIFastBridgeSettingsRequest struct {
+	Enabled bool `json:"enabled"`
+}
+
+// UpdateOpenAIFastBridgeSettings 更新 HTTP fast -> WS 桥接开关
+// PUT /api/v1/admin/settings/openai-fast-bridge
+func (h *SettingHandler) UpdateOpenAIFastBridgeSettings(c *gin.Context) {
+	var req UpdateOpenAIFastBridgeSettingsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+	settings := &service.OpenAIFastBridgeSettings{Enabled: req.Enabled}
+	if err := h.settingService.SetOpenAIFastBridgeSettings(c.Request.Context(), settings); err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
+	updated, err := h.settingService.GetOpenAIFastBridgeSettings(c.Request.Context())
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, dto.OpenAIFastBridgeSettings{Enabled: updated.Enabled})
+}
+
 // GetRateLimit429CooldownSettings 获取429默认回避配置
 // GET /api/v1/admin/settings/rate-limit-429-cooldown
 func (h *SettingHandler) GetRateLimit429CooldownSettings(c *gin.Context) {

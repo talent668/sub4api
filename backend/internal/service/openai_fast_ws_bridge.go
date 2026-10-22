@@ -8,11 +8,10 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// fastTierRequiresWSUpstream reports whether tier must be scheduled by the
-// ChatGPT Codex backend over the Responses WebSocket transport. The private
-// Codex backend accepts service_tier=priority on HTTP POST /responses but only
-// schedules (and bills) priority/ultrafast when the turn rides the WebSocket
-// transport; the HTTP response echo stays default/auto either way.
+// fastTierRequiresWSUpstream reports whether the tier is eligible for the
+// optional HTTP->WS bridge. HTTP Fast can take effect on its own in some
+// environments; this helper only decides whether the bridge may be used when
+// the operator enables it.
 func fastTierRequiresWSUpstream(tier string) bool {
 	switch tier {
 	case OpenAIFastTierPriority, OpenAIFastTierUltrafast:
@@ -50,9 +49,9 @@ func (s *OpenAIGatewayService) resolveOpenAIFastWSBridgeDecision(
 	if !account.UsesOpenAICodexProtocol() {
 		return baseDecision, false
 	}
-	if s.cfg == nil || !s.cfg.Gateway.OpenAIWS.FastBridgeEnabled {
-		// Opt-in: keep the pre-existing HTTP forwarding unless the operator asks
-		// to test the HTTP->WS fast path.
+	if !s.openAIFastBridgeEnabled(ctx) {
+		// Opt-in: keep the pre-existing HTTP forwarding unless the operator
+		// enables the web switch (or the YAML/env fallback).
 		return baseDecision, false
 	}
 	if isOpenAIResponsesCompactPath(c) {
@@ -92,6 +91,21 @@ func (s *OpenAIGatewayService) resolveOpenAIFastWSBridgeDecision(
 		}, true
 	}
 	return baseDecision, false
+}
+
+// openAIFastBridgeEnabled resolves the opt-in switch. A stored web setting wins;
+// without one the YAML/env fallback (gateway.openai_ws.fast_bridge_enabled) applies.
+func (s *OpenAIGatewayService) openAIFastBridgeEnabled(ctx context.Context) bool {
+	if s == nil {
+		return false
+	}
+	if s.settingService != nil {
+		settings, err := s.settingService.GetOpenAIFastBridgeSettings(ctx)
+		if err == nil && settings != nil && settings.Configured {
+			return settings.Enabled
+		}
+	}
+	return s.cfg != nil && s.cfg.Gateway.OpenAIWS.FastBridgeEnabled
 }
 
 // openAIFastBridgeMayOverrideAccountSwitch reports whether a group-forced fast
