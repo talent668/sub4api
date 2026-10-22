@@ -732,7 +732,6 @@ func (s *SettingService) GetOpenAIFastBridgeSettings(ctx context.Context) (*Open
 	if err := json.Unmarshal([]byte(value), &settings); err != nil {
 		return DefaultOpenAIFastBridgeSettings(), nil
 	}
-	settings.Configured = true
 	return &settings, nil
 }
 

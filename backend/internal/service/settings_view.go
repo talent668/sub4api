@@ -617,9 +617,6 @@ func DefaultOpenAIAPIKeyHealthBreakerSettings() *OpenAIAPIKeyHealthBreakerSettin
 // to the upstream Responses WebSocket. It is web-controlled and defaults off.
 type OpenAIFastBridgeSettings struct {
 	Enabled bool `json:"enabled"`
-	// Configured is true only when a stored web setting exists; it lets the
-	// gateway fall back to the YAML/env switch when the DB row is absent.
-	Configured bool `json:"-"`
 }
 
 // DefaultOpenAIFastBridgeSettings returns the conservative default (disabled).

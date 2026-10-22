@@ -93,19 +93,14 @@ func (s *OpenAIGatewayService) resolveOpenAIFastWSBridgeDecision(
 	return baseDecision, false
 }
 
-// openAIFastBridgeEnabled resolves the opt-in switch. A stored web setting wins;
-// without one the YAML/env fallback (gateway.openai_ws.fast_bridge_enabled) applies.
+// openAIFastBridgeEnabled resolves the web-only opt-in switch. It has no
+// config/env fallback: the Admin Settings toggle is the single source of truth.
 func (s *OpenAIGatewayService) openAIFastBridgeEnabled(ctx context.Context) bool {
-	if s == nil {
+	if s == nil || s.settingService == nil {
 		return false
 	}
-	if s.settingService != nil {
-		settings, err := s.settingService.GetOpenAIFastBridgeSettings(ctx)
-		if err == nil && settings != nil && settings.Configured {
-			return settings.Enabled
-		}
-	}
-	return s.cfg != nil && s.cfg.Gateway.OpenAIWS.FastBridgeEnabled
+	settings, err := s.settingService.GetOpenAIFastBridgeSettings(ctx)
+	return err == nil && settings != nil && settings.Enabled
 }
 
 // openAIFastBridgeMayOverrideAccountSwitch reports whether a group-forced fast

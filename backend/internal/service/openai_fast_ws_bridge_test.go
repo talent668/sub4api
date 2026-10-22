@@ -20,8 +20,6 @@ func newFastWSBridgeTestService(t *testing.T, cfg *config.Config, captureConn *o
 	t.Helper()
 	cfg.Security.URLAllowlist.Enabled = false
 	cfg.Security.URLAllowlist.AllowInsecureHTTP = true
-	// Most tests exercise the bridge; the disabled-switch case sets it back to false.
-	cfg.Gateway.OpenAIWS.FastBridgeEnabled = true
 	pool := newOpenAIWSConnPool(cfg)
 	dialer := &openAIWSCaptureDialer{conn: captureConn}
 	pool.setClientDialerForTest(dialer)
@@ -40,7 +38,9 @@ func newFastWSBridgeTestService(t *testing.T, cfg *config.Config, captureConn *o
 		toolCorrector:    NewCodexToolCorrector(),
 		openaiWSPool:     pool,
 		settingService: NewSettingService(
-			&openAIFastPolicyRepoStub{values: map[string]string{}},
+			&openAIFastPolicyRepoStub{values: map[string]string{
+				SettingKeyOpenAIFastBridgeSettings: `{"enabled":true}`,
+			}},
 			&config.Config{},
 		),
 	}
@@ -234,12 +234,14 @@ func TestOpenAIGatewayService_Forward_HTTPIngressFastBridgeFallsBackToHTTP(t *te
 }
 
 // TestOpenAIGatewayService_Forward_HTTPIngressFastBridgeDisabledStaysHTTP covers
-// the opt-in switch: with fast_bridge_enabled=false a forced priority request
-// keeps the legacy HTTP forwarding.
+// the web-only opt-in switch: with the Admin Settings toggle off a forced
+// priority request keeps the legacy HTTP forwarding.
 func TestOpenAIGatewayService_Forward_HTTPIngressFastBridgeDisabledStaysHTTP(t *testing.T) {
 	cfg := newOpenAIWSV2TestConfig()
 	svc, upstream, dialer := newFastWSBridgeTestService(t, cfg, newFastWSBridgeTestCaptureConn(t))
-	svc.cfg.Gateway.OpenAIWS.FastBridgeEnabled = false
+	svc.settingService.settingRepo = &openAIFastPolicyRepoStub{values: map[string]string{
+		SettingKeyOpenAIFastBridgeSettings: `{"enabled":false}`,
+	}}
 	c, _ := newFastWSBridgeTestGinContext(t)
 
 	body := []byte(`{"model":"gpt-6.1-sol","stream":false,"store":false,"instructions":"test","input":[{"type":"input_text","text":"hello"}]}`)

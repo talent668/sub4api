@@ -15,20 +15,17 @@ func TestOpenAIFastBridgeSettings_DefaultsOffAndRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, settings)
 	require.False(t, settings.Enabled)
-	require.False(t, settings.Configured, "absent DB row must fall back to YAML/env")
 
 	require.NoError(t, svc.SetOpenAIFastBridgeSettings(context.Background(), &OpenAIFastBridgeSettings{Enabled: true}))
 	settings, err = svc.GetOpenAIFastBridgeSettings(context.Background())
 	require.NoError(t, err)
 	require.NotNil(t, settings)
 	require.True(t, settings.Enabled)
-	require.True(t, settings.Configured)
 
 	require.NoError(t, svc.SetOpenAIFastBridgeSettings(context.Background(), &OpenAIFastBridgeSettings{Enabled: false}))
 	settings, err = svc.GetOpenAIFastBridgeSettings(context.Background())
 	require.NoError(t, err)
 	require.False(t, settings.Enabled)
-	require.True(t, settings.Configured)
 }
 
 func TestOpenAIFastBridgeSettings_RejectsNil(t *testing.T) {
