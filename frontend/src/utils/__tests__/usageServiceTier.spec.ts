@@ -52,11 +52,11 @@ describe('usageServiceTier utils', () => {
   it('maps fast channels to translated labels', () => {
     const translate = (key: string) => ({
       'usage.fastChannelWS': 'WS (Fast path)',
-      'usage.fastChannelHTTP': 'HTTP (may not apply to ChatGPT accounts)',
+      'usage.fastChannelHTTP': 'HTTP (WS bridge off)',
     })[key] ?? key
 
     expect(getUsageFastChannelLabel('ws', translate)).toBe('WS (Fast path)')
-    expect(getUsageFastChannelLabel('http', translate)).toBe('HTTP (may not apply to ChatGPT accounts)')
+    expect(getUsageFastChannelLabel('http', translate)).toBe('HTTP (WS bridge off)')
     expect(getUsageFastChannelLabel('none', translate)).toBe('')
   })
 })

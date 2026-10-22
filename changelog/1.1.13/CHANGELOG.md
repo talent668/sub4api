@@ -5,12 +5,12 @@
 - 用量记录新增「上游回声档位」`upstream_service_tier`：单独记录上游响应里返回的 `service_tier`（如 `default` / `priority` / `ultrafast`），与出站服务档位分开保存，便于确认上游是否真的接受了 Fast / Ultra Fast。
 - 后台用量「费用明细」新增「上游回声档位」一行，仅在上游响应声明了档位时显示。
 - 新增日志 `openai_service_tier_echo_mismatch`：出站档位与上游回声不一致时输出 `request_id`、账号、模型与两个档位，便于线上排查。
-- 修复 Fast / Ultra Fast 在 HTTP/SSE 入站下不生效的问题：ChatGPT Codex 私有后端只在 WebSocket 上游按 `priority` 调度，现对 OAuth/Codex 账号的 fast 请求自动桥接到上游 Responses WSv2；passthrough 账号同样生效，WS 不可用时自动回退 HTTP。
-- 后台用量「费用明细」新增「传输方式」（WS/HTTP）与「Fast 判定」：不再依赖不可信的 `service_tier` 回声判断 fast，Fast 请求可直接看到是否走了 WS Fast 路径。
+- 新增可选的 Fast HTTP→WS 桥接（默认关闭）：开启 `gateway.openai_ws.fast_bridge_enabled=true` 后，HTTP/SSE 入站的 OAuth/Codex 账号 priority/ultrafast 请求会改走上游 Responses WSv2；passthrough 账号同样生效，WS 不可用时自动回退 HTTP。默认关闭以保持既有 HTTP 转发行为，便于 A/B 验证。
+- 后台用量「费用明细」新增「传输方式」（WS/HTTP）与「Fast 判定」：不依赖不可信的 `service_tier` 回声，可直接看到 Fast 请求是否走了 WS 桥接。
 
 ## 升级说明
 
 - 启动时自动执行迁移 247：为 `usage_logs` 增加 `upstream_service_tier` 列；升级前请备份 PostgreSQL。
 - 历史数据该列为空，不影响既有用量展示；新请求开始记录。
-- 注意：ChatGPT Codex 私有后端对 Fast 请求可能仍回 `default`，上游回声为 `default` 不代表 Fast 未生效；API Key 直连官方账号的回声更具参考价值。
-- Fast 桥接需要 `gateway.openai_ws.enabled=true` 且未开启 `force_http`，并确保服务端可访问 `wss://chatgpt.com/backend-api/codex/responses`；验证实际效果请对比账号额度/TPS，而不是看回声。
+- 注意：ChatGPT Codex 私有后端对 Fast 请求可能仍回 `default`，上游回声为 `default` 不代表 Fast 未生效；HTTP 上游的 Fast 在部分账号/环境下也可直接生效，请以自己的速度/TPS A/B 为准。
+- Fast 桥接默认关闭；如需启用，设置 `gateway.openai_ws.fast_bridge_enabled=true`（同时需 `gateway.openai_ws.enabled=true` 且未开启 `force_http`，服务端可访问 `wss://chatgpt.com/backend-api/codex/responses`）。

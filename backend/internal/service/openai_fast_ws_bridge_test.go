@@ -20,6 +20,8 @@ func newFastWSBridgeTestService(t *testing.T, cfg *config.Config, captureConn *o
 	t.Helper()
 	cfg.Security.URLAllowlist.Enabled = false
 	cfg.Security.URLAllowlist.AllowInsecureHTTP = true
+	// Most tests exercise the bridge; the disabled-switch case sets it back to false.
+	cfg.Gateway.OpenAIWS.FastBridgeEnabled = true
 	pool := newOpenAIWSConnPool(cfg)
 	dialer := &openAIWSCaptureDialer{conn: captureConn}
 	pool.setClientDialerForTest(dialer)
@@ -229,6 +231,25 @@ func TestOpenAIGatewayService_Forward_HTTPIngressFastBridgeFallsBackToHTTP(t *te
 	reason, ok := c.Get("openai_ws_transport_reason")
 	require.True(t, ok)
 	require.Equal(t, "fast_bridge_fallback_http", reason)
+}
+
+// TestOpenAIGatewayService_Forward_HTTPIngressFastBridgeDisabledStaysHTTP covers
+// the opt-in switch: with fast_bridge_enabled=false a forced priority request
+// keeps the legacy HTTP forwarding.
+func TestOpenAIGatewayService_Forward_HTTPIngressFastBridgeDisabledStaysHTTP(t *testing.T) {
+	cfg := newOpenAIWSV2TestConfig()
+	svc, upstream, dialer := newFastWSBridgeTestService(t, cfg, newFastWSBridgeTestCaptureConn(t))
+	svc.cfg.Gateway.OpenAIWS.FastBridgeEnabled = false
+	c, _ := newFastWSBridgeTestGinContext(t)
+
+	body := []byte(`{"model":"gpt-6.1-sol","stream":false,"store":false,"instructions":"test","input":[{"type":"input_text","text":"hello"}]}`)
+	result, err := svc.Forward(fastWSBridgeTestContext(OpenAIFastTierPriority), c, fastWSBridgeTestAccount(true, false), body)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.False(t, result.OpenAIWSMode)
+	require.NotNil(t, upstream.lastReq)
+	require.Equal(t, OpenAIFastTierPriority, gjson.GetBytes(upstream.lastBody, "service_tier").String())
+	require.Equal(t, 0, dialer.DialCount(), "disabled bridge must not dial upstream WS")
 }
 
 type failingFastWSBridgeDialer struct{}

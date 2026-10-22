@@ -50,6 +50,11 @@ func (s *OpenAIGatewayService) resolveOpenAIFastWSBridgeDecision(
 	if !account.UsesOpenAICodexProtocol() {
 		return baseDecision, false
 	}
+	if s.cfg == nil || !s.cfg.Gateway.OpenAIWS.FastBridgeEnabled {
+		// Opt-in: keep the pre-existing HTTP forwarding unless the operator asks
+		// to test the HTTP->WS fast path.
+		return baseDecision, false
+	}
 	if isOpenAIResponsesCompactPath(c) {
 		return baseDecision, false
 	}
