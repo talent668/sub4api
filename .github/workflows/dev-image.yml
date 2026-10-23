@@ -1,0 +1,96 @@
+name: Dev image
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: sub4api-dev-image
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/talent668/sub4api
+
+jobs:
+  publish:
+    if: github.repository == 'talent668/sub4api' && github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - name: Resolve development version
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_version="$(tr -d '\r\n' < backend/cmd/server/VERSION)"
+          echo "version=${base_version}-dev.${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push development image
+        id: image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.IMAGE }}:dev
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            COMMIT=${{ github.sha }}
+            DATE=${{ steps.meta.outputs.date }}
+            GOPROXY=https://proxy.golang.org,direct
+            GOSUMDB=sum.golang.org
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ steps.meta.outputs.date }}
+          cache-from: |
+            type=gha,scope=sub4api-dev
+            type=gha
+          cache-to: type=gha,scope=sub4api-dev,mode=max
+      - name: Verify published image and anonymous pull
+        env:
+          DIGEST: ${{ steps.image.outputs.digest }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker logout ghcr.io
+          docker buildx imagetools inspect "$IMAGE:dev" | tee /tmp/dev-image-inspect.txt
+          grep -F "$DIGEST" /tmp/dev-image-inspect.txt
+          docker buildx imagetools inspect "$IMAGE@$DIGEST" --raw > /tmp/dev-image-manifest.json
+          python3 - <<'PY'
+          import json
+          with open('/tmp/dev-image-manifest.json') as stream:
+              manifest = json.load(stream)
+          platforms = {(m.get('platform', {}).get('os'), m.get('platform', {}).get('architecture')) for m in manifest.get('manifests', [])}
+          assert {('linux', 'amd64'), ('linux', 'arm64')} <= platforms, platforms
+          PY
+          docker run --rm "$IMAGE@$DIGEST" --version 2>&1 | tee /tmp/dev-image-version.txt
+          grep -F "$VERSION" /tmp/dev-image-version.txt
+          grep -F "$GITHUB_SHA" /tmp/dev-image-version.txt
+          docker run --rm "$IMAGE@$DIGEST" /bin/sh -ec 'pg_dump --version; psql --version; test -s /app/resources/model-pricing/model_prices_and_context_window.json'
+          {
+            echo "## Development image published"
+            echo
+            echo "Image: $IMAGE:dev"
+            echo "Digest: $DIGEST"
+            echo "Version: $VERSION"
+            echo "Commit: $GITHUB_SHA"
+            echo "Platforms: linux/amd64, linux/arm64"
+          } >> "$GITHUB_STEP_SUMMARY"
+

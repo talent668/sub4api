@@ -31,6 +31,10 @@ Sub4API 基于 sub2api 二次开发，完全兼容 sub2api，并会持续同步�
 开发环境使用 Go 1.27.3 和 pnpm 9.15.9。升级后，综合分组的图片生成能力需由管理员显式开启；
 已有 Gemini / Antigravity 分组通过迁移保留图片生成权限，Grok 4.7 Fast 按上游修正后的价格计费。
 
+测试镜像使用 `ghcr.io/talent668/sub4api:dev`，支持 `linux/amd64` 和 `linux/arm64`。
+每次推送到 `dev` 会由 [Dev image](.github/workflows/dev-image.yml) 工作流构建并更新此标签，
+应用版本包含 `dev` 和提交号。部署时将 `SUB4API_IMAGE` 设为该镜像并重新拉取、创建应用容器。
+
 ## 相比 sub2api 的主要改进
 
 ### 1. Codex 打票与票据管理
