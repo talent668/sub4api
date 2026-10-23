@@ -108,6 +108,237 @@ func (s *runtimeSettingRepoStub) Delete(_ context.Context, key string) error {
 	return nil
 }
 
+func TestRuntimeLogConfig_DiagnosticRetentionDefaultsAndValidation(t *testing.T) {
+	defaults := defaultOpsRuntimeLogConfig(nil)
+	if defaults.DiagnosticRetentionDays != 7 || defaults.DiagnosticMaxSizeMB != 0 || defaults.RetentionDays != 30 {
+		t.Fatalf("unexpected diagnostic/system defaults: %+v", defaults)
+	}
+	for _, raw := range []string{`{}`, `{"level":"info"}`, `{"diagnostic_retention_days":null,"diagnostic_max_size_mb":null}`} {
+		cfg, valid := decodeOpsRuntimeLogConfig(raw, defaults)
+		if !valid || cfg.DiagnosticRetentionDays != 7 || cfg.DiagnosticMaxSizeMB != 0 {
+			t.Fatalf("older JSON %q lost defaults: %+v valid=%v", raw, cfg, valid)
+		}
+	}
+	for _, tc := range []struct{ days, size int }{{1, 0}, {3650, 102400}, {7, 1}} {
+		cfg := *defaults
+		cfg.DiagnosticRetentionDays, cfg.DiagnosticMaxSizeMB = tc.days, tc.size
+		if err := validateOpsRuntimeLogConfig(&cfg); err != nil {
+			t.Fatalf("valid policy %+v rejected: %v", tc, err)
+		}
+	}
+	for _, tc := range []struct{ days, size int }{{0, 0}, {-1, 0}, {3651, 0}, {7, -1}, {7, 102401}} {
+		cfg := *defaults
+		cfg.DiagnosticRetentionDays, cfg.DiagnosticMaxSizeMB = tc.days, tc.size
+		normalizeOpsRuntimeLogConfig(&cfg, defaults)
+		if err := validateOpsRuntimeLogConfig(&cfg); err == nil {
+			t.Fatalf("explicit invalid policy %+v was normalized/accepted", tc)
+		}
+	}
+}
+
+func TestRuntimeLogConfig_DiagnosticRetentionPublicationAfterPersistence(t *testing.T) {
+	repo := newRuntimeSettingRepoStub()
+	old := defaultOpsRuntimeLogConfig(nil)
+	old.DiagnosticRetentionDays, old.DiagnosticMaxSizeMB = 21, 256
+	raw, _ := json.Marshal(old)
+	repo.values[SettingKeyOpsRuntimeLogConfig] = string(raw)
+	sink := &OpsSystemLogSink{}
+	svc := &OpsService{settingRepo: repo, systemLogSink: sink}
+	svc.applyRuntimeLogConfigOnStartup(context.Background())
+	oldPolicy := RequestDiagnosticRetentionPolicy{RetentionDays: 21, MaxSizeMB: 256}
+	if got := sink.diagnosticRetentionPolicy.Load(); got == nil || *got != oldPolicy {
+		t.Fatalf("startup policy = %v, want %+v", got, oldPolicy)
+	}
+	next := *old
+	next.DiagnosticRetentionDays, next.DiagnosticMaxSizeMB = 1, 1
+	persistErr := errors.New("persistence unavailable")
+	repo.setFn = func(string, string) error {
+		if got := sink.diagnosticRetentionPolicy.Load(); got == nil || *got != oldPolicy {
+			t.Fatalf("destructive policy published before Set: %v", got)
+		}
+		return persistErr
+	}
+	if _, err := svc.UpdateRuntimeLogConfig(context.Background(), &next, 7); !errors.Is(err, persistErr) {
+		t.Fatalf("update error = %v", err)
+	}
+	if got := *sink.diagnosticRetentionPolicy.Load(); got != oldPolicy {
+		t.Fatalf("failed update changed policy: %+v", got)
+	}
+	repo.setFn = nil
+	if _, err := svc.UpdateRuntimeLogConfig(context.Background(), &next, 7); err != nil {
+		t.Fatal(err)
+	}
+	nextPolicy := RequestDiagnosticRetentionPolicy{RetentionDays: 1, MaxSizeMB: 1}
+	if got := *sink.diagnosticRetentionPolicy.Load(); got != nextPolicy {
+		t.Fatalf("successful update did not publish: %+v", got)
+	}
+	repo.deleteFn = func(string) error {
+		if got := *sink.diagnosticRetentionPolicy.Load(); got != nextPolicy {
+			t.Fatalf("reset policy published before Delete: %+v", got)
+		}
+		return persistErr
+	}
+	if _, err := svc.ResetRuntimeLogConfig(context.Background(), 7); !errors.Is(err, persistErr) {
+		t.Fatalf("reset error = %v", err)
+	}
+	if got := *sink.diagnosticRetentionPolicy.Load(); got != nextPolicy {
+		t.Fatalf("failed reset changed policy: %+v", got)
+	}
+	repo.deleteFn = nil
+	if _, err := svc.ResetRuntimeLogConfig(context.Background(), 7); err != nil {
+		t.Fatal(err)
+	}
+	if got := *sink.diagnosticRetentionPolicy.Load(); got != (RequestDiagnosticRetentionPolicy{RetentionDays: 7}) {
+		t.Fatalf("successful reset did not publish defaults: %+v", got)
+	}
+}
+
+func TestRuntimeLogConfig_DiagnosticRetentionInvalidLoadFailClosed(t *testing.T) {
+	for _, raw := range []string{`{bad-json}`, `null`, `{"diagnostic_retention_days":0}`, `{"diagnostic_retention_days":3651}`, `{"diagnostic_max_size_mb":-1}`, `{"diagnostic_max_size_mb":102401}`} {
+		t.Run(raw, func(t *testing.T) {
+			repo := newRuntimeSettingRepoStub()
+			repo.values[SettingKeyOpsRuntimeLogConfig] = raw
+			sink := &OpsSystemLogSink{}
+			svc := &OpsService{settingRepo: repo, systemLogSink: sink}
+			svc.applyRuntimeLogConfigOnStartup(context.Background())
+			if got := sink.diagnosticRetentionPolicy.Load(); got != nil {
+				t.Fatalf("invalid startup authorized deletion: %+v", got)
+			}
+			if err := svc.RefreshRuntimeSettings(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if got := sink.diagnosticRetentionPolicy.Load(); got != nil {
+				t.Fatalf("invalid refresh authorized deletion: %+v", got)
+			}
+			policy := RequestDiagnosticRetentionPolicy{RetentionDays: 21, MaxSizeMB: 128}
+			if err := sink.SetRequestDiagnosticRetentionPolicy(policy); err != nil {
+				t.Fatal(err)
+			}
+			if err := svc.RefreshRuntimeSettings(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if got := *sink.diagnosticRetentionPolicy.Load(); got != policy {
+				t.Fatalf("invalid refresh replaced previous valid policy: %+v", got)
+			}
+		})
+	}
+}
+
+func TestRefreshRuntimeSettings_DiagnosticRetentionLoadsWithoutCaptureOrMonitoring(t *testing.T) {
+	repo := newRuntimeSettingRepoStub()
+	repo.values[SettingKeyOpsMonitoringEnabled] = "false"
+	repo.values[SettingKeyOpsAdvancedSettings] = `{"data_retention":{"cleanup_enabled":false}}`
+	sink := &OpsSystemLogSink{}
+	svc := &OpsService{settingRepo: repo, systemLogSink: sink}
+	for _, tc := range []struct {
+		raw  string
+		want RequestDiagnosticRetentionPolicy
+	}{
+		{`{}`, RequestDiagnosticRetentionPolicy{RetentionDays: 7}},
+		{`{"diagnostic_retention_days":14,"diagnostic_max_size_mb":32,"persist_request_diagnostics":false}`, RequestDiagnosticRetentionPolicy{RetentionDays: 14, MaxSizeMB: 32}},
+	} {
+		repo.values[SettingKeyOpsRuntimeLogConfig] = tc.raw
+		if err := svc.RefreshRuntimeSettings(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if got := sink.diagnosticRetentionPolicy.Load(); got == nil || *got != tc.want {
+			t.Fatalf("policy = %v, want %+v", got, tc.want)
+		}
+		if sink.RequestDiagnosticsEnabled() || svc.IsMonitoringEnabled(context.Background()) {
+			t.Fatal("test expected capture and monitoring disabled")
+		}
+	}
+	delete(repo.values, SettingKeyOpsRuntimeLogConfig)
+	if err := svc.RefreshRuntimeSettings(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := *sink.diagnosticRetentionPolicy.Load(); got != (RequestDiagnosticRetentionPolicy{RetentionDays: 7}) {
+		t.Fatalf("missing stored config should publish defaults: %+v", got)
+	}
+}
+
+func TestRuntimeLogConfig_RequestDiagnosticsDefaultsAndLifecycle(t *testing.T) {
+	repo := newRuntimeSettingRepoStub()
+	sink := &OpsSystemLogSink{}
+	svc := &OpsService{settingRepo: repo, systemLogSink: sink}
+	// Stored configurations written before this switch existed must remain off.
+	repo.values[SettingKeyOpsRuntimeLogConfig] = `{"level":"info","extra":{"future_setting":"keep"}}`
+	cfg, err := svc.GetRuntimeLogConfig(context.Background())
+	if err != nil || cfg.PersistRequestDiagnostics || defaultOpsRuntimeLogConfig(nil).PersistRequestDiagnostics {
+		t.Fatalf("diagnostics must default off: %#v, %v", cfg, err)
+	}
+	cfg.PersistRequestDiagnostics = true
+	updated, err := svc.UpdateRuntimeLogConfig(context.Background(), cfg, 1)
+	if err != nil || !updated.PersistRequestDiagnostics || !sink.RequestDiagnosticsEnabled() {
+		t.Fatalf("update did not enable diagnostics: %#v, %v", updated, err)
+	}
+	// Omitted Extra from old clients must not erase unrelated stored settings.
+	cfg.Extra = nil
+	if _, err := svc.UpdateRuntimeLogConfig(context.Background(), cfg, 1); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := svc.GetRuntimeLogConfig(context.Background())
+	if err != nil || stored.Extra["future_setting"] != "keep" || !stored.PersistRequestDiagnostics {
+		t.Fatalf("stored config lost settings: %#v, %v", stored, err)
+	}
+	sink.SetPersistRequestDiagnostics(false)
+	svc.applyRuntimeLogConfigOnStartup(context.Background())
+	if !sink.RequestDiagnosticsEnabled() {
+		t.Fatal("startup did not apply diagnostic setting")
+	}
+	repo.setFn = func(string, string) error { return errors.New("write failed") }
+	next := *stored
+	next.PersistRequestDiagnostics = false
+	if _, err := svc.UpdateRuntimeLogConfig(context.Background(), &next, 1); err == nil || !sink.RequestDiagnosticsEnabled() {
+		t.Fatal("failed persistence did not restore enabled diagnostic gate")
+	}
+	repo.setFn = nil
+	repo.deleteFn = func(string) error { return errors.New("delete failed") }
+	if _, err := svc.ResetRuntimeLogConfig(context.Background(), 1); err == nil || !sink.RequestDiagnosticsEnabled() {
+		t.Fatal("failed reset did not restore enabled diagnostic gate")
+	}
+	repo.deleteFn = nil
+	reset, err := svc.ResetRuntimeLogConfig(context.Background(), 1)
+	if err != nil || reset.PersistRequestDiagnostics || sink.RequestDiagnosticsEnabled() {
+		t.Fatalf("reset did not disable diagnostics: %#v, %v", reset, err)
+	}
+}
+
+func TestRefreshRuntimeSettings_RequestDiagnosticGate(t *testing.T) {
+	repo := newRuntimeSettingRepoStub()
+	sink := &OpsSystemLogSink{}
+	svc := &OpsService{settingRepo: repo, systemLogSink: sink}
+	for _, tc := range []struct {
+		raw  string
+		want bool
+	}{
+		{raw: `{"persist_request_diagnostics":true}`, want: true},
+		{raw: `{"persist_access_logs":true}`, want: false},
+		{raw: `{"persist_request_diagnostics":true}`, want: true},
+		{raw: `{bad-json}`, want: false},
+	} {
+		repo.values[SettingKeyOpsRuntimeLogConfig] = tc.raw
+		if err := svc.RefreshRuntimeSettings(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if sink.RequestDiagnosticsEnabled() != tc.want {
+			t.Fatalf("refresh %q diagnostic gate = %v, want %v", tc.raw, sink.RequestDiagnosticsEnabled(), tc.want)
+		}
+	}
+}
+
+func TestRuntimeLogConfig_MarshalFailureDoesNotChangeDiagnosticGate(t *testing.T) {
+	repo := newRuntimeSettingRepoStub()
+	sink := &OpsSystemLogSink{}
+	svc := &OpsService{settingRepo: repo, systemLogSink: sink}
+	cfg := defaultOpsRuntimeLogConfig(nil)
+	cfg.PersistRequestDiagnostics = true
+	cfg.Extra = map[string]any{"unsupported": make(chan int)}
+	if _, err := svc.UpdateRuntimeLogConfig(context.Background(), cfg, 1); err == nil || sink.RequestDiagnosticsEnabled() {
+		t.Fatal("encoding failure changed the diagnostic gate")
+	}
+}
+
 func TestUpdateRuntimeLogConfig_InvalidConfigShouldNotApply(t *testing.T) {
 	repo := newRuntimeSettingRepoStub()
 	svc := &OpsService{
@@ -322,14 +553,16 @@ func TestUpdateRuntimeLogConfig_PersistFailureRollback(t *testing.T) {
 	}
 
 	_, err := svc.UpdateRuntimeLogConfig(context.Background(), &OpsRuntimeLogConfig{
-		Level:             "debug",
-		PersistAccessLogs: true,
-		EnableSampling:    false,
-		SamplingInitial:   100,
-		SamplingNext:      100,
-		Caller:            true,
-		StacktraceLevel:   "error",
-		RetentionDays:     30,
+		Level:                     "debug",
+		PersistAccessLogs:         true,
+		PersistRequestDiagnostics: true,
+		EnableSampling:            false,
+		SamplingInitial:           100,
+		SamplingNext:              100,
+		Caller:                    true,
+		StacktraceLevel:           "error",
+		RetentionDays:             30,
+		DiagnosticRetentionDays:   7,
 	}, 5)
 	if err == nil {
 		t.Fatalf("expected persist error")
@@ -340,6 +573,9 @@ func TestUpdateRuntimeLogConfig_PersistFailureRollback(t *testing.T) {
 	}
 	if svc.systemLogSink.persistAccessLogs.Load() {
 		t.Fatal("access-log persistence should rollback after setting write failure")
+	}
+	if svc.systemLogSink.RequestDiagnosticsEnabled() {
+		t.Fatal("diagnostic persistence should rollback after setting write failure")
 	}
 }
 
@@ -414,13 +650,14 @@ func TestDefaultNormalizeAndValidateRuntimeLogConfig(t *testing.T) {
 	}
 
 	cfg := &OpsRuntimeLogConfig{
-		Level:           " ",
-		EnableSampling:  true,
-		SamplingInitial: 0,
-		SamplingNext:    -1,
-		Caller:          true,
-		StacktraceLevel: "",
-		RetentionDays:   0,
+		Level:                   " ",
+		EnableSampling:          true,
+		SamplingInitial:         0,
+		SamplingNext:            -1,
+		Caller:                  true,
+		StacktraceLevel:         "",
+		RetentionDays:           0,
+		DiagnosticRetentionDays: 7,
 	}
 	normalizeOpsRuntimeLogConfig(cfg, defaults)
 	if cfg.Level != "debug" || cfg.StacktraceLevel != "fatal" {
@@ -545,14 +782,16 @@ func TestUpdateRuntimeLogConfig_Success(t *testing.T) {
 	}
 
 	next, err := svc.UpdateRuntimeLogConfig(context.Background(), &OpsRuntimeLogConfig{
-		Level:             "debug",
-		PersistAccessLogs: true,
-		EnableSampling:    false,
-		SamplingInitial:   100,
-		SamplingNext:      100,
-		Caller:            true,
-		StacktraceLevel:   "error",
-		RetentionDays:     30,
+		Level:                     "debug",
+		PersistAccessLogs:         true,
+		PersistRequestDiagnostics: true,
+		EnableSampling:            false,
+		SamplingInitial:           100,
+		SamplingNext:              100,
+		Caller:                    true,
+		StacktraceLevel:           "error",
+		RetentionDays:             30,
+		DiagnosticRetentionDays:   7,
 	}, 2)
 	if err != nil {
 		t.Fatalf("UpdateRuntimeLogConfig() error: %v", err)

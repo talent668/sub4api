@@ -11,6 +11,7 @@ export default {
         gateway: 'Gateway',
         email: 'Email',
         backup: 'Backup',
+        debugLogs: 'Debug / Logs',
         payment: 'Payment',
       },
       features: {

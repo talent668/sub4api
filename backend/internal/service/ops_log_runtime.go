@@ -22,15 +22,17 @@ func defaultOpsRuntimeLogConfig(cfg *config.Config) *OpsRuntimeLogConfig {
 		}
 	}
 	out := &OpsRuntimeLogConfig{
-		Level:                "info",
-		PersistAccessLogs:    false,
-		EnableSampling:       false,
-		SamplingInitial:      100,
-		SamplingNext:         100,
-		Caller:               true,
-		StacktraceLevel:      "error",
-		RetentionDays:        30,
-		RequestRetentionDays: &requestRetentionDays,
+		Level:                   "info",
+		PersistAccessLogs:       false,
+		EnableSampling:          false,
+		SamplingInitial:         100,
+		SamplingNext:            100,
+		Caller:                  true,
+		StacktraceLevel:         "error",
+		RetentionDays:           30,
+		DiagnosticRetentionDays: defaultRequestDiagnosticRetentionDays,
+		DiagnosticMaxSizeMB:     0,
+		RequestRetentionDays:    &requestRetentionDays,
 	}
 	if cfg == nil {
 		return out
@@ -100,17 +102,43 @@ func validateOpsRuntimeLogConfig(cfg *OpsRuntimeLogConfig) error {
 	if cfg.RequestRetentionDays != nil && (*cfg.RequestRetentionDays < 0 || *cfg.RequestRetentionDays > 3650) {
 		return errors.New("request_retention_days must be between 0 and 3650")
 	}
-	return nil
+	return validateRequestDiagnosticRetentionPolicy(requestDiagnosticRetentionPolicyFromConfig(cfg))
+}
+
+func requestDiagnosticRetentionPolicyFromConfig(cfg *OpsRuntimeLogConfig) RequestDiagnosticRetentionPolicy {
+	return RequestDiagnosticRetentionPolicy{RetentionDays: cfg.DiagnosticRetentionDays, MaxSizeMB: cfg.DiagnosticMaxSizeMB}
+}
+
+// Decode older stored JSON with diagnostic defaults already populated. Do not
+// normalize these fields: an explicitly stored/submitted zero-day policy is not
+// equivalent to a missing field and must never authorize deletion.
+func decodeOpsRuntimeLogConfig(raw string, defaults *OpsRuntimeLogConfig) (*OpsRuntimeLogConfig, bool) {
+	cfg := &OpsRuntimeLogConfig{
+		DiagnosticRetentionDays: defaults.DiagnosticRetentionDays,
+		DiagnosticMaxSizeMB:     defaults.DiagnosticMaxSizeMB,
+	}
+	if err := json.Unmarshal([]byte(raw), cfg); err != nil || strings.TrimSpace(raw) == "null" {
+		return defaults, false
+	}
+	normalizeOpsRuntimeLogConfig(cfg, defaults)
+	return cfg, validateRequestDiagnosticRetentionPolicy(requestDiagnosticRetentionPolicyFromConfig(cfg)) == nil
 }
 
 func (s *OpsService) GetRuntimeLogConfig(ctx context.Context) (*OpsRuntimeLogConfig, error) {
+	cfg, _, err := s.loadRuntimeLogConfig(ctx)
+	return cfg, err
+}
+
+// policyValid records load provenance separately from the display fallback:
+// malformed storage may return defaults to GET, but must not start deletion.
+func (s *OpsService) loadRuntimeLogConfig(ctx context.Context) (*OpsRuntimeLogConfig, bool, error) {
 	if s == nil || s.settingRepo == nil {
 		var cfg *config.Config
 		if s != nil {
 			cfg = s.cfg
 		}
 		defaultCfg := defaultOpsRuntimeLogConfig(cfg)
-		return defaultCfg, nil
+		return defaultCfg, true, nil
 	}
 	defaultCfg := defaultOpsRuntimeLogConfig(s.cfg)
 	if ctx == nil {
@@ -122,17 +150,13 @@ func (s *OpsService) GetRuntimeLogConfig(ctx context.Context) (*OpsRuntimeLogCon
 		if errors.Is(err, ErrSettingNotFound) {
 			b, _ := json.Marshal(defaultCfg)
 			_ = s.settingRepo.Set(ctx, SettingKeyOpsRuntimeLogConfig, string(b))
-			return defaultCfg, nil
+			return defaultCfg, true, nil
 		}
-		return nil, err
+		return nil, false, err
 	}
 
-	cfg := &OpsRuntimeLogConfig{}
-	if err := json.Unmarshal([]byte(raw), cfg); err != nil {
-		return defaultCfg, nil
-	}
-	normalizeOpsRuntimeLogConfig(cfg, defaultCfg)
-	return cfg, nil
+	cfg, policyValid := decodeOpsRuntimeLogConfig(raw, defaultCfg)
+	return cfg, policyValid, nil
 }
 
 func (s *OpsService) UpdateRuntimeLogConfig(ctx context.Context, req *OpsRuntimeLogConfig, operatorID int64) (*OpsRuntimeLogConfig, error) {
@@ -149,22 +173,24 @@ func (s *OpsService) UpdateRuntimeLogConfig(ctx context.Context, req *OpsRuntime
 		return nil, errors.New("invalid operator id")
 	}
 
+	// Serialize persistence and retention publication with background refresh so
+	// a stale refresh cannot overwrite a newly committed destructive policy.
+	s.runtimeSettingsMu.Lock()
+	defer s.runtimeSettingsMu.Unlock()
 	oldCfg, err := s.GetRuntimeLogConfig(ctx)
 	if err != nil {
 		return nil, err
 	}
 	next := *req
+	if next.Extra == nil {
+		next.Extra = oldCfg.Extra
+	}
 	if next.RequestRetentionDays == nil {
 		next.RequestRetentionDays = oldCfg.RequestRetentionDays
 	}
 	normalizeOpsRuntimeLogConfig(&next, defaultOpsRuntimeLogConfig(s.cfg))
 	if err := validateOpsRuntimeLogConfig(&next); err != nil {
 		s.auditRuntimeLogConfigFailure(operatorID, oldCfg, &next, "validation_failed: "+err.Error())
-		return nil, err
-	}
-
-	if err := s.applyRuntimeLogConfig(&next); err != nil {
-		s.auditRuntimeLogConfigFailure(operatorID, oldCfg, &next, "apply_failed: "+err.Error())
 		return nil, err
 	}
 
@@ -176,6 +202,10 @@ func (s *OpsService) UpdateRuntimeLogConfig(ctx context.Context, req *OpsRuntime
 	if err != nil {
 		return nil, err
 	}
+	if err := s.applyRuntimeLogConfig(&next); err != nil {
+		s.auditRuntimeLogConfigFailure(operatorID, oldCfg, &next, "apply_failed: "+err.Error())
+		return nil, err
+	}
 	if err := s.settingRepo.Set(ctx, SettingKeyOpsRuntimeLogConfig, string(encoded)); err != nil {
 		// 存储失败时回滚到旧配置，避免内存状态与持久化状态不一致。
 		_ = s.applyRuntimeLogConfig(oldCfg)
@@ -183,6 +213,9 @@ func (s *OpsService) UpdateRuntimeLogConfig(ctx context.Context, req *OpsRuntime
 		return nil, err
 	}
 
+	// Retention is irreversible and cannot be rolled back like logger levels.
+	// Never expose it to the maintenance worker before persistence succeeds.
+	s.publishRequestDiagnosticRetentionPolicy(&next)
 	s.auditRuntimeLogConfigChange(operatorID, oldCfg, &next, "updated")
 	s.reloadOpsCleanup(ctx)
 
@@ -200,6 +233,8 @@ func (s *OpsService) ResetRuntimeLogConfig(ctx context.Context, operatorID int64
 		return nil, errors.New("invalid operator id")
 	}
 
+	s.runtimeSettingsMu.Lock()
+	defer s.runtimeSettingsMu.Unlock()
 	oldCfg, err := s.GetRuntimeLogConfig(ctx)
 	if err != nil {
 		return nil, err
@@ -228,6 +263,7 @@ func (s *OpsService) ResetRuntimeLogConfig(ctx context.Context, operatorID int64
 	resetCfg.UpdatedAt = now
 	resetCfg.UpdatedByUserID = operatorID
 
+	s.publishRequestDiagnosticRetentionPolicy(resetCfg)
 	s.auditRuntimeLogConfigChange(operatorID, oldCfg, resetCfg, "reset")
 	s.reloadOpsCleanup(ctx)
 	return resetCfg, nil
@@ -239,6 +275,7 @@ func (s *OpsService) applyRuntimeLogConfig(cfg *OpsRuntimeLogConfig) error {
 	}
 	if s != nil && s.systemLogSink != nil {
 		s.systemLogSink.SetPersistAccessLogs(cfg.PersistAccessLogs)
+		s.systemLogSink.SetPersistRequestDiagnostics(cfg.PersistRequestDiagnostics)
 	}
 	return nil
 }
@@ -274,11 +311,22 @@ func (s *OpsService) applyRuntimeLogConfigOnStartup(ctx context.Context) {
 	if s == nil {
 		return
 	}
-	cfg, err := s.GetRuntimeLogConfig(ctx)
+	s.runtimeSettingsMu.Lock()
+	defer s.runtimeSettingsMu.Unlock()
+	cfg, policyValid, err := s.loadRuntimeLogConfig(ctx)
 	if err != nil {
 		return
 	}
 	_ = s.applyRuntimeLogConfig(cfg)
+	if policyValid {
+		s.publishRequestDiagnosticRetentionPolicy(cfg)
+	}
+}
+
+func (s *OpsService) publishRequestDiagnosticRetentionPolicy(cfg *OpsRuntimeLogConfig) {
+	if s != nil && s.systemLogSink != nil && cfg != nil {
+		_ = s.systemLogSink.SetRequestDiagnosticRetentionPolicy(requestDiagnosticRetentionPolicyFromConfig(cfg))
+	}
 }
 
 func (s *OpsService) auditRuntimeLogConfigChange(operatorID int64, oldCfg *OpsRuntimeLogConfig, newCfg *OpsRuntimeLogConfig, action string) {

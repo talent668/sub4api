@@ -563,6 +563,7 @@ function mountView() {
         ProxySelector: true,
         ImageUpload: ImageUploadStub,
         BackupSettings: true,
+        OpsSystemLogTable: true,
         CodexTicketCadenceSettings: true,
       },
     },
@@ -723,6 +724,27 @@ describe("admin SettingsView payment visible method controls", () => {
     });
     fetchPublicSettings.mockResolvedValue(undefined);
     adminSettingsFetch.mockResolvedValue(undefined);
+  });
+
+  it("mounts Debug / Logs only while active and excludes the global save action", async () => {
+    const wrapper = mountView();
+    await flushPromises();
+    const initialSaveStyle = wrapper.get('.settings-save-bar').attributes('style');
+    expect(wrapper.find('ops-system-log-table-stub').exists()).toBe(false);
+    await wrapper.get('#settings-tab-debugLogs').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('ops-system-log-table-stub').exists()).toBe(true);
+    expect(wrapper.findComponent({ name: 'OpsSystemLogTable' }).props('diagnosticsMode')).toBe(true);
+    expect(wrapper.find('.settings-save-bar').exists() && wrapper.find('.settings-save-bar').isVisible()).toBe(false);
+    await wrapper.get('form').trigger('submit');
+    expect(updateSettings).not.toHaveBeenCalled();
+    await wrapper.get('#settings-tab-general').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('ops-system-log-table-stub').exists()).toBe(false);
+    expect(wrapper.get('.settings-save-bar').attributes('style') || '').toBe(initialSaveStyle || '');
+    expect(enSettings.settings.tabs.debugLogs).toBe('Debug / Logs');
+    expect(zhSettings.settings.tabs.debugLogs).toBe('调试 / 日志');
+    wrapper.unmount();
   });
 
   it("defaults ticket harvesting to off and preserves a saved enabled value", async () => {

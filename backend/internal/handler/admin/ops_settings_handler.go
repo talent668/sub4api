@@ -134,7 +134,12 @@ func (h *OpsHandler) UpdateRuntimeLogConfig(c *gin.Context) {
 		return
 	}
 
-	var req service.OpsRuntimeLogConfig
+	var req struct {
+		service.OpsRuntimeLogConfig
+		PersistRequestDiagnostics *bool `json:"persist_request_diagnostics"`
+		DiagnosticRetentionDays   *int  `json:"diagnostic_retention_days"`
+		DiagnosticMaxSizeMB       *int  `json:"diagnostic_max_size_mb"`
+	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "Invalid request body")
 		return
@@ -146,7 +151,29 @@ func (h *OpsHandler) UpdateRuntimeLogConfig(c *gin.Context) {
 		return
 	}
 
-	updated, err := h.opsService.UpdateRuntimeLogConfig(c.Request.Context(), &req, subject.UserID)
+	// Older clients omit the diagnostic policy, and null has the same preserve
+	// semantics. Explicit numeric values (including invalid zero days) reach
+	// validation unchanged rather than being silently normalized to defaults.
+	if req.PersistRequestDiagnostics == nil || req.DiagnosticRetentionDays == nil || req.DiagnosticMaxSizeMB == nil {
+		current, err := h.opsService.GetRuntimeLogConfig(c.Request.Context())
+		if err != nil {
+			response.Error(c, http.StatusInternalServerError, "Failed to get runtime log config")
+			return
+		}
+		req.OpsRuntimeLogConfig.PersistRequestDiagnostics = current.PersistRequestDiagnostics
+		req.OpsRuntimeLogConfig.DiagnosticRetentionDays = current.DiagnosticRetentionDays
+		req.OpsRuntimeLogConfig.DiagnosticMaxSizeMB = current.DiagnosticMaxSizeMB
+	}
+	if req.PersistRequestDiagnostics != nil {
+		req.OpsRuntimeLogConfig.PersistRequestDiagnostics = *req.PersistRequestDiagnostics
+	}
+	if req.DiagnosticRetentionDays != nil {
+		req.OpsRuntimeLogConfig.DiagnosticRetentionDays = *req.DiagnosticRetentionDays
+	}
+	if req.DiagnosticMaxSizeMB != nil {
+		req.OpsRuntimeLogConfig.DiagnosticMaxSizeMB = *req.DiagnosticMaxSizeMB
+	}
+	updated, err := h.opsService.UpdateRuntimeLogConfig(c.Request.Context(), &req.OpsRuntimeLogConfig, subject.UserID)
 	if err != nil {
 		response.Error(c, http.StatusBadRequest, err.Error())
 		return

@@ -11,6 +11,7 @@ export default {
         gateway: '网关服务',
         email: '邮件设置',
         backup: '数据备份',
+        debugLogs: '调试 / 日志',
         payment: '支付设置',
       },
       features: {

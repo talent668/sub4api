@@ -90,6 +90,13 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	if err := json.Unmarshal(body, &anthropicReq); err != nil {
 		return nil, fmt.Errorf("parse anthropic request: %w", err)
 	}
+	// Preserve only projected client metadata before compat/model normalization.
+	// The private context never retains the parsed request or its content.
+	var clientDiagnosticHeaders http.Header
+	if c != nil && c.Request != nil {
+		clientDiagnosticHeaders = c.Request.Header
+	}
+	ctx = withOpenAIWSClientDiagnostic(ctx, &anthropicReq, clientDiagnosticHeaders)
 	anthropicDigestReq := cloneAnthropicRequestForDigest(&anthropicReq)
 	originalModel := anthropicReq.Model
 	applyOpenAICompatModelNormalization(&anthropicReq)
@@ -220,9 +227,11 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		return nil, fmt.Errorf("marshal responses request: %w", err)
 	}
 
+	var codexReqBody map[string]any
+	var codexBodySnapshot []byte
 	if account.UsesOpenAICodexProtocol() && account.Platform != PlatformGrok {
 		var reqBody map[string]any
-		if err := json.Unmarshal(responsesBody, &reqBody); err != nil {
+		if err := decodeOpenAIJSONUseNumber(responsesBody, &reqBody); err != nil {
 			return nil, fmt.Errorf("unmarshal for codex transform: %w", err)
 		}
 		codexResult := applyCodexOAuthTransformWithOptions(reqBody, codexOAuthTransformOptions{
@@ -277,6 +286,10 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		if err != nil {
 			return nil, fmt.Errorf("remarshal after codex transform: %w", err)
 		}
+		// Keep the transform map only while its exact marshaled body is current.
+		// Policies below remain authoritative and may replace responsesBody.
+		codexReqBody = reqBody
+		codexBodySnapshot = responsesBody
 	}
 
 	// For API key accounts (including OpenAI-compatible upstream gateways),
@@ -359,8 +372,11 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	// according to the web setting. The final policy-produced tier is unchanged;
 	// failures before downstream output can safely use the existing HTTP path.
 	if bridgeDecision, bridgeOK := s.resolveAnthropicMessagesWSBridge(ctx, account, upstreamModel, responsesBody); bridgeOK {
-		var bridgeReqBody map[string]any
-		if decodeErr := decodeOpenAIJSONUseNumber(responsesBody, &bridgeReqBody); decodeErr == nil && bridgeReqBody != nil {
+		bridgeReqBody, decodeErr := selectOpenAIMessagesWSRequestBody(responsesBody, codexReqBody, codexBodySnapshot)
+		// WS preparation may mutate nested maps. Consume the retained map once;
+		// HTTP fallback and billing continue using the immutable final body bytes.
+		codexReqBody, codexBodySnapshot = nil, nil
+		if decodeErr == nil && bridgeReqBody != nil {
 			bridgeReasoningEffort := ""
 			if responsesReq.Reasoning != nil {
 				bridgeReasoningEffort = strings.TrimSpace(responsesReq.Reasoning.Effort)
@@ -634,6 +650,21 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 
 	stampOpenAIResponsesUpstreamEndpoint(c, result)
 	return result, handleErr
+}
+
+// selectOpenAIMessagesWSRequestBody transfers the request-local transform map to
+// the WS attempt only when no later body rewrite changed its marshaled snapshot.
+// The caller must not mutate the snapshot/final bytes or reuse the map after WS
+// preparation, which can mutate nested values. All other paths decode as before.
+func selectOpenAIMessagesWSRequestBody(body []byte, codexReqBody map[string]any, codexBodySnapshot []byte) (map[string]any, error) {
+	if codexReqBody != nil && len(codexBodySnapshot) > 0 && bytes.Equal(body, codexBodySnapshot) {
+		return codexReqBody, nil
+	}
+	var reqBody map[string]any
+	if err := decodeOpenAIJSONUseNumber(body, &reqBody); err != nil {
+		return nil, err
+	}
+	return reqBody, nil
 }
 
 func ensureCodexOAuthInstructionsField(reqBody map[string]any) {

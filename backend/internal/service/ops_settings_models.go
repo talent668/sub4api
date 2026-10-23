@@ -71,13 +71,19 @@ type OpsMetricThresholds struct {
 type OpsRuntimeLogConfig struct {
 	Level             string `json:"level"`
 	PersistAccessLogs bool   `json:"persist_access_logs"`
-	EnableSampling    bool   `json:"enable_sampling"`
-	SamplingInitial   int    `json:"sampling_initial"`
-	SamplingNext      int    `json:"sampling_thereafter"`
-	Caller            bool   `json:"caller"`
-	StacktraceLevel   string `json:"stacktrace_level"`
-	// RetentionDays is the authoritative retention for ops_system_logs.
-	RetentionDays int `json:"retention_days"`
+	// PersistRequestDiagnostics admits only explicitly allowlisted, safe request summaries.
+	PersistRequestDiagnostics bool   `json:"persist_request_diagnostics"`
+	EnableSampling            bool   `json:"enable_sampling"`
+	SamplingInitial           int    `json:"sampling_initial"`
+	SamplingNext              int    `json:"sampling_thereafter"`
+	Caller                    bool   `json:"caller"`
+	StacktraceLevel           string `json:"stacktrace_level"`
+	// RetentionDays controls ordinary ops_system_logs; request diagnostics use
+	// their own policy, independently of capture and the general cleanup switch.
+	RetentionDays           int `json:"retention_days"`
+	DiagnosticRetentionDays int `json:"diagnostic_retention_days"`
+	// DiagnosticMaxSizeMB is a logical diagnostic-only quota; 0 disables it.
+	DiagnosticMaxSizeMB int `json:"diagnostic_max_size_mb"`
 	// RequestRetentionDays controls usage_logs; 0 keeps request history indefinitely.
 	// A nil value from older clients preserves the existing setting.
 	RequestRetentionDays *int           `json:"request_retention_days"`

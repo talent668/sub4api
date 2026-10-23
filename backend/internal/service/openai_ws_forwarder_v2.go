@@ -42,6 +42,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		return nil, wrapOpenAIWSFallback("invalid_state", errors.New("service or account is nil"))
 	}
 	responseModelObserver := &upstreamResponseModelObserver{}
+	latency := openAIWSLatencyFromContext(ctx)
 
 	wsURL, err := s.buildOpenAIResponsesWSURL(account)
 	if err != nil {
@@ -205,6 +206,11 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	acquireCtx, acquireCancel := context.WithTimeout(ctx, s.openAIWSAcquireTimeout())
 	defer acquireCancel()
 
+	if latency != nil {
+		latency.diagnostic.observeProposedHeaders(wsHeaders)
+		latency.forceNewConn = forceNewConn
+		latency.acquireStart = time.Now()
+	}
 	lease, err := s.getOpenAIWSConnPool().Acquire(acquireCtx, openAIWSAcquireRequest{
 		Account:          account,
 		WSURL:            wsURL,
@@ -222,6 +228,15 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 			return ""
 		}(),
 	})
+	if latency != nil {
+		latency.acquireEnd = time.Now()
+		if err == nil {
+			latency.acquired = true
+			latency.connReused = lease.Reused()
+			latency.connPick = lease.ConnPickDuration()
+			latency.queueWait = lease.QueueWaitDuration()
+		}
+	}
 	if err != nil {
 		var agentDialErr *openAIWSDialError
 		if s.isAgentIdentityAccount(ctx, account) && errors.As(err, &agentDialErr) && isAgentIdentityTaskInvalidWSDialError(agentDialErr) && agentTaskRecoveryTried != nil && !*agentTaskRecoveryTried {
@@ -270,6 +285,9 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		}
 		lease.Release()
 	}()
+	if latency != nil {
+		latency.diagnostic.observeHandshakeHeaders(lease.HandshakeHeaders())
+	}
 	if sink != nil {
 		// 非 /v1/responses 下游（目前是 Anthropic Messages 兼容桥）需要握手头里的
 		// x-request-id / x-codex-turn-state 才能复用现有转换与续链逻辑。
@@ -355,7 +373,16 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		return nil, err
 	}
 
-	if err := lease.WriteJSONWithContextTimeout(ctx, payload, s.openAIWSWriteTimeout()); err != nil {
+	if latency != nil {
+		latency.diagnostic.observeWriteAttempt(payload)
+		latency.writeStart = time.Now()
+	}
+	writeErr := lease.WriteJSONWithContextTimeout(ctx, payload, s.openAIWSWriteTimeout())
+	if latency != nil {
+		latency.writeEnd = time.Now()
+		latency.diagnostic.observeWriteCompleted(writeErr)
+	}
+	if err := writeErr; err != nil {
 		lease.MarkBroken()
 		logOpenAIWSModeInfo(
 			"write_request_fail account_id=%d conn_id=%s cause=%s payload_bytes=%d",
@@ -555,6 +582,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	// Keep per-read timeouts unchanged for connected clients. Once a client
 	// disconnects, use the same timeout as a bounded total drain budget.
 	var pendingJSONDocuments [][]byte
+	var pendingJSONReceivedAt time.Time
 
 readLoop:
 	for {
@@ -565,11 +593,13 @@ readLoop:
 		markClientRequestCanceled()
 		var message []byte
 		var readErr error
+		var receivedAt time.Time
 		readUsedDetachedContext := upstreamReadDetached
 		readBoundByFirstOutput := false
 		if len(pendingJSONDocuments) > 0 {
 			message = pendingJSONDocuments[0]
 			pendingJSONDocuments = pendingJSONDocuments[1:]
+			receivedAt = pendingJSONReceivedAt
 		} else {
 			currentReadTimeout := readTimeout
 			if !firstOutputDeadline.IsZero() && firstTokenMs == nil && !wroteDownstream && !clientDisconnected {
@@ -593,6 +623,10 @@ readLoop:
 				}
 			}
 			message, readErr = lease.ReadMessageWithContextTimeout(upstreamReadCtx, currentReadTimeout)
+			if latency != nil && latency.firstText.IsZero() && readErr == nil {
+				receivedAt = time.Now()
+				pendingJSONReceivedAt = receivedAt
+			}
 			if readErr == nil {
 				if documents, repaired := splitOpenAIConcatenatedJSONDocuments(message); repaired {
 					logOpenAIWSModeInfo(
@@ -695,7 +729,11 @@ readLoop:
 		if firstTokenMs == nil && isTokenEvent {
 			ms := int(time.Since(startTime).Milliseconds())
 			firstTokenMs = &ms
+			if latency != nil {
+				latency.firstSemanticMs = firstTokenMs
+			}
 		}
+		latency.observeEvent(receivedAt, eventType, message)
 		if debugEnabled && shouldLogOpenAIWSEvent(eventCount, eventType) {
 			logOpenAIWSModeDebug(
 				"event_received account_id=%d conn_id=%s idx=%d type=%s bytes=%d token=%v terminal=%v buffered_pending=%d",

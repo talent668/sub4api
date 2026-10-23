@@ -824,6 +824,7 @@ export interface OpsAggregationSettings {
 export interface OpsRuntimeLogConfig {
   level: 'debug' | 'info' | 'warn' | 'error'
   persist_access_logs: boolean
+  persist_request_diagnostics: boolean
   enable_sampling: boolean
   sampling_initial: number
   sampling_thereafter: number
@@ -831,9 +832,109 @@ export interface OpsRuntimeLogConfig {
   stacktrace_level: 'none' | 'error' | 'fatal'
   retention_days: number
   request_retention_days: number
+  diagnostic_retention_days?: number
+  diagnostic_max_size_mb?: number
   source?: string
   updated_at?: string
   updated_by_user_id?: number
+}
+
+// Content-free snapshots are optional on older diagnostics. Runtime consumers must
+// project these fields again; API types alone are not a safety boundary.
+export interface OpsDiagnosticClientRequest {
+  model?: string
+  stream?: boolean
+  max_tokens?: number
+  speed?: 'standard' | 'fast' | 'normal'
+  temperature?: number
+  top_p?: number
+  thinking?: { type?: 'enabled' | 'disabled' | 'adaptive'; budget_tokens?: number }
+  output_config?: { effort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' }
+  tool_choice?: 'auto' | 'any' | 'tool' | 'none'
+  messages_count?: number
+  tools_count?: number
+}
+
+export interface OpsDiagnosticUpstreamRequest {
+  type?: 'response.create'
+  model?: string
+  stream?: boolean
+  store?: boolean
+  service_tier?: 'auto' | 'default' | 'flex' | 'priority' | 'scale' | 'ultrafast'
+  reasoning?: { effort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'; summary?: 'auto' | 'concise' | 'detailed' }
+  max_output_tokens?: number
+  temperature?: number
+  top_p?: number
+  parallel_tool_calls?: boolean
+  text?: { verbosity?: 'low' | 'medium' | 'high'; format?: { type?: 'text' | 'json_object' | 'json_schema' } }
+  tool_choice?: 'auto' | 'none' | 'required'
+  input_count?: number
+  tools_count?: number
+  has_previous_response_id?: boolean
+  has_prompt_cache_key?: boolean
+  write_attempted?: boolean
+  write_completed?: boolean
+}
+
+export interface OpsDiagnosticHeaders {
+  content_type?: 'application/json' | 'text/event-stream'
+  accept?: 'application/json' | 'text/event-stream' | '*/*'
+  anthropic_version?: '2023-06-01'
+  openai_beta?: Array<'responses_websockets=2026-02-04' | 'responses_websockets=2026-02-06'>
+  connection?: 'upgrade' | 'keep-alive' | 'close'
+  upgrade?: 'websocket'
+}
+
+export interface OpsDiagnosticResponse {
+  model?: string
+  service_tier?: 'auto' | 'default' | 'flex' | 'priority' | 'scale' | 'ultrafast'
+  status?: 'queued' | 'in_progress' | 'completed' | 'failed' | 'incomplete' | 'cancelled' | 'canceled'
+  terminal_event?: 'response.completed' | 'response.failed' | 'response.incomplete' | 'response.done' | 'response.cancelled' | 'response.canceled' | 'error'
+  incomplete_reason?: 'max_output_tokens' | 'content_filter'
+  error_code?: 'server_error' | 'internal_error' | 'rate_limit_exceeded' | 'insufficient_quota' | 'invalid_api_key'
+    | 'invalid_request_error' | 'invalid_request' | 'invalid_value' | 'invalid_parameter' | 'missing_required_parameter'
+    | 'unknown_parameter' | 'unsupported_parameter' | 'model_not_found' | 'context_length_exceeded' | 'max_output_tokens'
+    | 'content_filter' | 'content_policy_violation' | 'previous_response_not_found' | 'invalid_encrypted_content'
+    | 'websocket_connection_limit_reached' | 'websocket_session_timeout' | 'websocket_event_type_not_supported'
+    | 'websocket_error' | 'request_timeout' | 'timeout' | 'cancelled' | 'canceled'
+  error_type?: 'invalid_request_error' | 'authentication_error' | 'permission_error' | 'not_found_error' | 'rate_limit_error'
+    | 'rate_limit_exceeded' | 'api_error' | 'server_error' | 'overloaded_error' | 'timeout_error' | 'connection_error'
+}
+
+export interface OpsDiagnosticUsage {
+  input_tokens?: number
+  output_tokens?: number
+  cache_read_input_tokens?: number
+  cache_creation_input_tokens?: number
+  reasoning_tokens?: number
+  total_tokens?: number
+}
+
+// Only these typed fields are displayed for request diagnostics; never render raw extra.
+export interface OpsRequestDiagnostics {
+  client_request?: OpsDiagnosticClientRequest
+  upstream_request?: OpsDiagnosticUpstreamRequest
+  client_request_headers?: OpsDiagnosticHeaders
+  upstream_request_headers?: OpsDiagnosticHeaders
+  upstream_handshake_headers?: OpsDiagnosticHeaders
+  response?: OpsDiagnosticResponse
+  usage?: OpsDiagnosticUsage
+  prep_ms?: number
+  acquire_ms?: number
+  prewrite_ms?: number
+  write_ms?: number
+  upstream_first_event_wait_ms?: number
+  upstream_first_semantic_wait_ms?: number
+  first_semantic_ms?: number
+  first_text_ms?: number
+  attempt_duration_ms?: number
+  conn_reused?: boolean
+  force_new_conn?: boolean
+  conn_pick_ms?: number
+  queue_wait_ms?: number
+  ingress?: string
+  transport?: string
+  outcome?: string
 }
 
 export interface OpsSystemLog {
@@ -856,6 +957,8 @@ export interface OpsSystemLog {
 export type OpsSystemLogListResponse = PaginatedResponse<OpsSystemLog>
 
 export interface OpsSystemLogQuery {
+  /** Exact event name, independent of keyword search. */
+  event?: string
   page?: number
   page_size?: number
   time_range?: '5m' | '30m' | '1h' | '6h' | '24h' | '7d' | '30d'
@@ -875,6 +978,7 @@ export interface OpsSystemLogQuery {
 }
 
 export interface OpsSystemLogCleanupRequest {
+  event?: string
   start_time?: string
   end_time?: string
   host?: string
@@ -898,6 +1002,19 @@ export interface OpsSystemLogSinkHealth {
   written_count: number
   avg_write_delay_ms: number
   last_error?: string
+  diagnostic_retention?: {
+    policy_configured: boolean
+    last_run_at?: string
+    last_error?: string
+    result?: {
+      deleted_expired: number
+      deleted_for_size: number
+      scanned_rows: number
+      lock_skipped: boolean
+      scan_incomplete: boolean
+      has_more: boolean
+    }
+  }
 }
 
 export interface OpsErrorLog {

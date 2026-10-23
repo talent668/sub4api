@@ -55,6 +55,24 @@ func newOpsSystemLogTestRouter(handler *OpsHandler, withUser bool) *gin.Engine {
 	return r
 }
 
+func TestOpsSystemLogHandler_ExactEventListAndCleanup(t *testing.T) {
+	repo := &opsSystemLogCaptureRepo{}
+	svc := service.NewOpsService(repo, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	r := newOpsSystemLogTestRouter(NewOpsHandler(svc), true)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/logs?event=%20openai.messages_ws_latency%20", nil))
+	if w.Code != http.StatusOK || repo.listFilter == nil || repo.listFilter.Event != "openai.messages_ws_latency" {
+		t.Fatalf("list event filter not forwarded: status=%d filter=%#v", w.Code, repo.listFilter)
+	}
+	w = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/logs/cleanup", bytes.NewBufferString(`{"event":" openai.messages_ws_latency "}`))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || repo.cleanupFilter == nil || repo.cleanupFilter.Event != repo.listFilter.Event {
+		t.Fatalf("cleanup event filter not forwarded: status=%d filter=%#v", w.Code, repo.cleanupFilter)
+	}
+}
+
 func TestOpsSystemLogHandler_ListUnavailable(t *testing.T) {
 	h := NewOpsHandler(nil)
 	r := newOpsSystemLogTestRouter(h, false)

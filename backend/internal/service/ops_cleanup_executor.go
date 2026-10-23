@@ -8,6 +8,11 @@ import (
 	"time"
 )
 
+// OpsRequestDiagnosticLogSQLPredicate is deliberately null-safe: its negation
+// must retain ordinary logs with a missing/null event in automatic cleanup.
+// Keep diagnostics retention and general cleanup scoped to exactly the same rows.
+const OpsRequestDiagnosticLogSQLPredicate = `COALESCE(component = 'gateway.request_diagnostics' AND message = 'openai.messages_ws_latency' AND extra->>'event' = 'openai.messages_ws_latency', FALSE)`
+
 const (
 	opsCleanupDefaultSchedule  = "0 2 * * *"
 	opsCleanupBatchSize        = 5000
@@ -51,7 +56,7 @@ func (c opsCleanupDeletedCounts) String() string {
 
 // opsCleanupPlan 把"保留天数"翻译成具体的清理动作。
 //   - days < 0  → 跳过该项清理（ok=false），保留兼容老数据
-//   - days == 0 → TRUNCATE TABLE（O(1) 全清），truncate=true
+//   - days == 0 → 全清，truncate=true（系统日志始终使用保留诊断日志的批量 DELETE）
 //   - days > 0  → 批量 DELETE 早于 now-N天 的行，cutoff = now - N 天
 func opsCleanupPlan(now time.Time, days int) (cutoff time.Time, truncate, ok bool) {
 	if days < 0 {
@@ -99,20 +104,35 @@ func deleteOldRowsByID(
 		where = fmt.Sprintf("%s < $1::date", timeColumn)
 	}
 
+	return deleteOpsRowsInBatches(ctx, db, table, where, []any{cutoff}, batchSize)
+}
+
+func deleteOpsRowsInBatches(ctx context.Context, db *sql.DB, table, where string, args []any, batchSize int) (int64, error) {
+	if table == "ops_system_logs" {
+		if where != "" {
+			where += " AND "
+		}
+		where += "NOT (" + OpsRequestDiagnosticLogSQLPredicate + ")"
+	}
+	deleteWhere := "id IN (SELECT id FROM batch)"
+	if table == "ops_system_logs" {
+		deleteWhere += " AND NOT (" + OpsRequestDiagnosticLogSQLPredicate + ")"
+	}
 	q := fmt.Sprintf(`
 WITH batch AS (
   SELECT id FROM %s
   WHERE %s
   ORDER BY id
-  LIMIT $2
+  LIMIT $%d
 )
 DELETE FROM %s
-WHERE id IN (SELECT id FROM batch)
-`, table, where, table)
+WHERE %s
+`, table, where, len(args)+1, table, deleteWhere)
+	args = append(args, batchSize)
 
 	var total int64
 	for {
-		res, err := db.ExecContext(ctx, q, cutoff, batchSize)
+		res, err := db.ExecContext(ctx, q, args...)
 		if err != nil {
 			if isMissingRelationError(err) {
 				return total, nil
@@ -131,10 +151,15 @@ WHERE id IN (SELECT id FROM batch)
 	return total, nil
 }
 
-// truncateOpsTable 用 TRUNCATE TABLE 清空指定表，先 SELECT COUNT(*) 取得清空前行数用于 heartbeat。
+// truncateOpsTable clears other tables with TRUNCATE and a pre-count for the
+// heartbeat. System logs instead use scoped batches, including days=0, so their
+// independently retained request diagnostics can never be truncated.
 func truncateOpsTable(ctx context.Context, db *sql.DB, table string) (int64, error) {
 	if db == nil {
 		return 0, nil
+	}
+	if table == "ops_system_logs" {
+		return deleteOpsRowsInBatches(ctx, db, table, "", nil, opsCleanupBatchSize)
 	}
 	var count int64
 	if err := db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", table)).Scan(&count); err != nil {

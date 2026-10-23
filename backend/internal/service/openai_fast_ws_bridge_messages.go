@@ -9,8 +9,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MACOS-DO/sub4api/internal/pkg/ctxkey"
+	"github.com/MACOS-DO/sub4api/internal/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
+	"go.uber.org/zap"
 )
 
 // openAIFastWSBridgeServerAvailable reports whether the global WS switches allow
@@ -102,7 +105,31 @@ func (s *OpenAIGatewayService) forwardAnthropicMessagesViaFastWS(
 	startTime time.Time,
 	reasoningEffort string,
 	firstOutputTimeout time.Duration,
-) (*OpenAIForwardResult, error, bool) {
+) (outResult *OpenAIForwardResult, outErr error, handled bool) {
+	// Capture only request correlation metadata before starting the WS producer.
+	fields := []zap.Field{zap.String("platform", PlatformOpenAI), zap.String("model", upstreamModel)}
+	if account != nil && account.ID > 0 {
+		fields = append(fields, zap.Int64("account_id", account.ID))
+	}
+	if apiKeyID := getAPIKeyIDFromContext(c); apiKeyID > 0 {
+		fields = append(fields, zap.Int64("api_key_id", apiKeyID))
+	}
+	if userID, ok := ctx.Value(ctxkey.UserID).(int64); ok && userID > 0 {
+		fields = append(fields, zap.Int64("user_id", userID))
+	}
+	for _, key := range []ctxkey.Key{ctxkey.RequestID, ctxkey.ClientRequestID} {
+		if value, ok := ctx.Value(key).(string); ok && value != "" {
+			name := "request_id"
+			if key == ctxkey.ClientRequestID {
+				name = "client_request_id"
+			}
+			fields = append(fields, zap.String(name, value))
+		}
+	}
+	ctx = logger.IntoContext(ctx, logger.FromContext(ctx).With(fields...))
+	latency := &openAIWSLatency{start: startTime, diagnostic: newOpenAIWSDiagnosticMetadata(ctx)}
+	defer func() { latency.log(ctx, outResult, outErr, handled) }()
+	ctx = context.WithValue(ctx, openAIWSLatencyContextKey{}, latency)
 	// Both client modes need the full event stream: buffered Messages replies
 	// recover missing terminal text/tool arguments from the preceding deltas.
 	wsCtx, stopWS := context.WithCancelCause(ctx)

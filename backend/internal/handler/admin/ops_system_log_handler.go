@@ -19,6 +19,7 @@ type opsSystemLogCleanupRequest struct {
 
 	Level           string `json:"level"`
 	Component       string `json:"component"`
+	Event           string `json:"event"`
 	RequestID       string `json:"request_id"`
 	ClientRequestID string `json:"client_request_id"`
 	UserID          *int64 `json:"user_id"`
@@ -60,6 +61,7 @@ func (h *OpsHandler) ListSystemLogs(c *gin.Context) {
 		Host:            strings.TrimSpace(c.Query("host")),
 		Level:           strings.TrimSpace(c.Query("level")),
 		Component:       strings.TrimSpace(c.Query("component")),
+		Event:           strings.TrimSpace(c.Query("event")),
 		RequestID:       strings.TrimSpace(c.Query("request_id")),
 		ClientRequestID: strings.TrimSpace(c.Query("client_request_id")),
 		Platform:        strings.TrimSpace(c.Query("platform")),
@@ -158,6 +160,7 @@ func (h *OpsHandler) CleanupSystemLogs(c *gin.Context) {
 		Host:            strings.TrimSpace(req.Host),
 		Level:           strings.TrimSpace(req.Level),
 		Component:       strings.TrimSpace(req.Component),
+		Event:           strings.TrimSpace(req.Event),
 		RequestID:       strings.TrimSpace(req.RequestID),
 		ClientRequestID: strings.TrimSpace(req.ClientRequestID),
 		UserID:          req.UserID,

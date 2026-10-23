@@ -13,6 +13,106 @@ import (
 	"github.com/MACOS-DO/sub4api/internal/pkg/logger"
 )
 
+func TestOpsSystemLogSink_RequestDiagnosticsAdmission(t *testing.T) {
+	sink := &OpsSystemLogSink{queue: make(chan *logger.LogEvent, 8)}
+	valid := &logger.LogEvent{
+		Level: "debug", Component: logger.RequestDiagnosticsComponent, Message: logger.MessagesWSLatencyEvent,
+		Fields: map[string]any{"event": logger.MessagesWSLatencyEvent},
+	}
+	for _, level := range []string{"debug", "info", "warn", "error"} {
+		valid.Level = level
+		sink.WriteLogEvent(valid)
+	}
+	if len(sink.queue) != 0 {
+		t.Fatal("disabled diagnostics bypassed admission through severity")
+	}
+	sink.SetPersistRequestDiagnostics(true)
+	if !sink.shouldIndex(valid) {
+		t.Fatal("explicitly enabled exact diagnostic was not admitted")
+	}
+	for _, event := range []*logger.LogEvent{
+		{Level: "debug", Component: "gateway.other", Message: "other"},
+		{Level: "error", Component: logger.RequestDiagnosticsComponent, Message: "payload secret"},
+		{Level: "warn", Component: logger.RequestDiagnosticsComponent, Message: logger.MessagesWSLatencyEvent, Fields: map[string]any{"event": "openai.messages_ws_latency.extra"}},
+		{Level: "error", Component: "other", Message: logger.MessagesWSLatencyEvent, Fields: map[string]any{"event": logger.MessagesWSLatencyEvent}},
+		{Level: "warn", Component: logger.RequestDiagnosticsComponent, Message: logger.MessagesWSLatencyEvent, Fields: map[string]any{"event": logger.MessagesWSLatencyEvent, "component": "audit.bypass"}},
+		{Level: "info", Component: logger.RequestDiagnosticsComponent, Message: logger.MessagesWSLatencyEvent, Fields: map[string]any{"event": logger.MessagesWSLatencyEvent, logger.OpsSystemLogSkipField: true}},
+	} {
+		if sink.shouldIndex(event) {
+			t.Fatalf("nonallowlisted event admitted: %#v", event)
+		}
+	}
+	sink.SetPersistRequestDiagnostics(false)
+	if sink.RequestDiagnosticsEnabled() {
+		t.Fatal("diagnostic disable not applied")
+	}
+}
+
+func TestOpsSystemLogSink_RequestDiagnosticsProjectsBeforeQueueAndStorage(t *testing.T) {
+	var captured []*OpsInsertSystemLogInput
+	sink := NewOpsSystemLogSink(&opsRepoMock{
+		BatchInsertSystemLogsFn: func(_ context.Context, inputs []*OpsInsertSystemLogInput) (int64, error) {
+			captured = inputs
+			return int64(len(inputs)), nil
+		},
+	})
+	defer sink.Stop()
+	sink.SetPersistRequestDiagnostics(true)
+	event := &logger.LogEvent{
+		Level: "error", Component: logger.RequestDiagnosticsComponent, Message: logger.MessagesWSLatencyEvent,
+		Fields: map[string]any{
+			"event": logger.MessagesWSLatencyEvent, "request_id": "req-1", "client_request_id": "Bearer secret",
+			"user_id": 7, "api_key_id": 8, "account_id": 9, "model": "gpt-5", "platform": "openai",
+			"outcome": "failed", "prep_ms": 3, "conn_reused": true,
+			"authorization": "Bearer secret", "body": "private prompt", "response": "private answer", "error": "credential secret",
+		},
+	}
+	sink.WriteLogEvent(event)
+	queued := <-sink.queue
+	if queued == event || queued.Level != "info" || len(queued.Fields) != 11 {
+		t.Fatalf("diagnostic not projected before queue: %#v", queued)
+	}
+	// Mutating the producer's map cannot inject a secret into the queued event.
+	event.Fields["request_id"] = "private prompt"
+	if _, err := sink.flushBatch(context.Background(), []*logger.LogEvent{queued}); err != nil {
+		t.Fatal(err)
+	}
+	if len(captured) != 1 {
+		t.Fatalf("stored rows = %d", len(captured))
+	}
+	row := captured[0]
+	if row.RequestID != "req-1" || row.ClientRequestID != "" || row.Component != logger.RequestDiagnosticsComponent || row.Message != logger.MessagesWSLatencyEvent || row.Level != "info" {
+		t.Fatalf("unsafe indexed metadata: %#v", row)
+	}
+	for _, secret := range []string{"secret", "private", "authorization", "body", "response", "error"} {
+		if strings.Contains(row.ExtraJSON, secret) {
+			t.Fatalf("unsafe field survived projection: %s", row.ExtraJSON)
+		}
+	}
+	sink.SetPersistRequestDiagnostics(false)
+	if n, err := sink.flushBatch(context.Background(), []*logger.LogEvent{queued}); err != nil || n != 0 {
+		t.Fatalf("disabled diagnostic gate did not drop buffered event: n=%d err=%v", n, err)
+	}
+}
+
+func TestOpsSystemLogSink_NormalLogsPreserveExtra(t *testing.T) {
+	var captured []*OpsInsertSystemLogInput
+	sink := NewOpsSystemLogSink(&opsRepoMock{
+		BatchInsertSystemLogsFn: func(_ context.Context, inputs []*OpsInsertSystemLogInput) (int64, error) {
+			captured = inputs
+			return int64(len(inputs)), nil
+		},
+	})
+	defer sink.Stop()
+	sink.WriteLogEvent(&logger.LogEvent{Level: "warn", Component: "app", Message: "normal warning", Fields: map[string]any{"custom_field": "preserve-me"}})
+	if _, err := sink.flushBatch(context.Background(), []*logger.LogEvent{<-sink.queue}); err != nil {
+		t.Fatal(err)
+	}
+	if len(captured) != 1 || !strings.Contains(captured[0].ExtraJSON, `"custom_field":"preserve-me"`) {
+		t.Fatalf("normal extra was projected: %#v", captured)
+	}
+}
+
 func TestOpsSystemLogSink_ShouldIndex(t *testing.T) {
 	sink := &OpsSystemLogSink{}
 

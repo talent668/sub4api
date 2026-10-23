@@ -202,6 +202,7 @@ type OpsSystemLogFilter struct {
 
 	Level     string
 	Component string
+	Event     string
 
 	RequestID       string
 	ClientRequestID string
@@ -223,6 +224,7 @@ type OpsSystemLogCleanupFilter struct {
 
 	Level     string
 	Component string
+	Event     string
 
 	RequestID       string
 	ClientRequestID string

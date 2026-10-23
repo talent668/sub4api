@@ -115,6 +115,98 @@ func newRuntimeOpsService(t *testing.T) *service.OpsService {
 	return service.NewOpsService(nil, settingRepo, cfg, nil, nil, nil, nil, nil, nil, nil, nil)
 }
 
+func TestOpsRuntimeLoggingHandler_DiagnosticRetentionPresenceAndValidation(t *testing.T) {
+	h := NewOpsHandler(newRuntimeOpsService(t))
+	r := newOpsRuntimeRouter(h, true)
+	for _, tc := range []struct {
+		name   string
+		fields string
+		status int
+		days   int
+		size   int
+	}{
+		{"old client defaults", "", http.StatusOK, 7, 0},
+		{"explicit policy", `,"diagnostic_retention_days":21,"diagnostic_max_size_mb":128`, http.StatusOK, 21, 128},
+		{"old client preserves", "", http.StatusOK, 21, 128},
+		{"null preserves", `,"diagnostic_retention_days":null,"diagnostic_max_size_mb":null`, http.StatusOK, 21, 128},
+		{"zero disables quota", `,"diagnostic_max_size_mb":0`, http.StatusOK, 21, 0},
+		{"minimum days", `,"diagnostic_retention_days":1`, http.StatusOK, 1, 0},
+		{"maximums", `,"diagnostic_retention_days":3650,"diagnostic_max_size_mb":102400`, http.StatusOK, 3650, 102400},
+		{"zero days rejected", `,"diagnostic_retention_days":0`, http.StatusBadRequest, 0, 0},
+		{"negative days rejected", `,"diagnostic_retention_days":-1`, http.StatusBadRequest, 0, 0},
+		{"excess days rejected", `,"diagnostic_retention_days":3651`, http.StatusBadRequest, 0, 0},
+		{"negative quota rejected", `,"diagnostic_max_size_mb":-1`, http.StatusBadRequest, 0, 0},
+		{"excess quota rejected", `,"diagnostic_max_size_mb":102401`, http.StatusBadRequest, 0, 0},
+		{"fraction rejected", `,"diagnostic_retention_days":1.5`, http.StatusBadRequest, 0, 0},
+		{"string rejected", `,"diagnostic_max_size_mb":"1"`, http.StatusBadRequest, 0, 0},
+		{"invalid writes preserve previous", "", http.StatusOK, 3650, 102400},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"level":"info","sampling_initial":100,"sampling_thereafter":100,"stacktrace_level":"error","retention_days":30` + tc.fields + `}`
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPut, "/runtime/logging", bytes.NewBufferString(body))
+			req.Header.Set("Content-Type", "application/json")
+			r.ServeHTTP(w, req)
+			if w.Code != tc.status {
+				t.Fatalf("status=%d, want %d, body=%s", w.Code, tc.status, w.Body.String())
+			}
+			if tc.status != http.StatusOK {
+				return
+			}
+			var result struct {
+				Data service.OpsRuntimeLogConfig `json:"data"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if result.Data.DiagnosticRetentionDays != tc.days || result.Data.DiagnosticMaxSizeMB != tc.size || result.Data.RetentionDays != 30 {
+				t.Fatalf("unexpected policy/system retention: %+v", result.Data)
+			}
+		})
+	}
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/runtime/logging/reset", nil))
+	var result struct {
+		Data service.OpsRuntimeLogConfig `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil || w.Code != http.StatusOK || result.Data.DiagnosticRetentionDays != 7 || result.Data.DiagnosticMaxSizeMB != 0 {
+		t.Fatalf("reset did not return7/0: status=%d body=%s err=%v", w.Code, w.Body.String(), err)
+	}
+}
+
+func TestOpsRuntimeLoggingHandler_RequestDiagnosticsPresence(t *testing.T) {
+	h := NewOpsHandler(newRuntimeOpsService(t))
+	r := newOpsRuntimeRouter(h, true)
+	for _, tc := range []struct {
+		field string
+		want  bool
+	}{
+		{field: `,"persist_request_diagnostics":true`, want: true},
+		{field: "", want: true},
+		{field: `,"persist_request_diagnostics":null`, want: true},
+		{field: `,"persist_request_diagnostics":false`, want: false},
+		{field: "", want: false},
+	} {
+		body := `{"level":"info","sampling_initial":100,"sampling_thereafter":100,"stacktrace_level":"error","retention_days":30` + tc.field + `}`
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPut, "/runtime/logging", bytes.NewBufferString(body))
+		req.Header.Set("Content-Type", "application/json")
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("update status=%d, body=%s", w.Code, w.Body.String())
+		}
+		var result struct {
+			Data service.OpsRuntimeLogConfig `json:"data"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		if result.Data.PersistRequestDiagnostics != tc.want {
+			t.Fatalf("field %q diagnostic persistence = %v, want %v", tc.field, result.Data.PersistRequestDiagnostics, tc.want)
+		}
+	}
+}
+
 func TestOpsRuntimeLoggingHandler_GetConfig(t *testing.T) {
 	h := NewOpsHandler(newRuntimeOpsService(t))
 	r := newOpsRuntimeRouter(h, false)

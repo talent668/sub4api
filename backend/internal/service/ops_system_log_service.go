@@ -92,6 +92,7 @@ func marshalSystemLogCleanupConditions(filter *OpsSystemLogCleanupFilter) string
 		"host":              strings.TrimSpace(filter.Host),
 		"level":             strings.TrimSpace(filter.Level),
 		"component":         strings.TrimSpace(filter.Component),
+		"event":             strings.TrimSpace(filter.Event),
 		"request_id":        strings.TrimSpace(filter.RequestID),
 		"client_request_id": strings.TrimSpace(filter.ClientRequestID),
 		"platform":          strings.TrimSpace(filter.Platform),

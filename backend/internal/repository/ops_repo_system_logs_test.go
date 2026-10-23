@@ -99,6 +99,23 @@ func TestBuildOpsSystemLogsCleanupWhere_WithClientRequestIDAndUserID(t *testing.
 	}
 }
 
+func TestBuildOpsSystemLogsWhere_ExactEventAndCleanupConsistency(t *testing.T) {
+	// Wildcards and SQL punctuation remain a bound exact-match value.
+	event := "openai.messages_ws_latency%' OR true --"
+	where, args, constrained := buildOpsSystemLogsWhere(&service.OpsSystemLogFilter{Event: " " + event + " "})
+	if !constrained || len(args) != 1 || args[0] != event || !strings.Contains(where, "COALESCE(l.extra->>'event','') = $1") || strings.Contains(where, event) || strings.Contains(where, "ILIKE") {
+		t.Fatalf("event filter not an exact parameterized match: %s %#v", where, args)
+	}
+	cleanupWhere, cleanupArgs, cleanupConstrained := buildOpsSystemLogsCleanupWhere(&service.OpsSystemLogCleanupFilter{Event: event})
+	if cleanupWhere != where || !cleanupConstrained || len(cleanupArgs) != 1 || cleanupArgs[0] != args[0] {
+		t.Fatalf("cleanup event filter differs: %s %#v", cleanupWhere, cleanupArgs)
+	}
+	_, args, constrained = buildOpsSystemLogsWhere(&service.OpsSystemLogFilter{Event: " "})
+	if constrained || len(args) != 0 {
+		t.Fatal("empty event must not constrain cleanup")
+	}
+}
+
 func contains(s string, sub string) bool {
 	return strings.Contains(s, sub)
 }

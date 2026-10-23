@@ -1,5 +1,23 @@
 <template>
   <AppLayout>
+    <nav class="mb-6 flex flex-wrap gap-2" :aria-label="t('admin.audit.title')" data-testid="admin-log-navigation">
+      <RouterLink
+        :to="logLocation('audit')"
+        class="rounded-lg px-4 py-2 text-sm font-medium transition-colors"
+        :class="activeLog === 'audit' ? 'bg-primary-100 text-primary-700 dark:bg-primary-900/30 dark:text-primary-300' : 'text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-dark-800'"
+        :aria-current="activeLog === 'audit' ? 'page' : undefined"
+        data-testid="audit-log-tab"
+      >{{ t('admin.audit.title') }}</RouterLink>
+      <RouterLink
+        :to="logLocation('debug')"
+        class="rounded-lg px-4 py-2 text-sm font-medium transition-colors"
+        :class="activeLog === 'debug' ? 'bg-primary-100 text-primary-700 dark:bg-primary-900/30 dark:text-primary-300' : 'text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-dark-800'"
+        :aria-current="activeLog === 'debug' ? 'page' : undefined"
+        data-testid="debug-log-tab"
+      >{{ t('admin.settings.tabs.debugLogs') }}</RouterLink>
+    </nav>
+    <OpsSystemLogTable v-if="activeLog === 'debug'" diagnostics-mode />
+    <template v-else>
     <TablePageLayout>
       <!-- Filters -->
       <template #filters>
@@ -348,11 +366,13 @@
         </button>
       </template>
     </BaseDialog>
+    </template>
   </AppLayout>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { RouterLink, useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { adminAPI, type AuditLog } from '@/api/admin'
 import { totpAPI } from '@/api'
@@ -366,9 +386,17 @@ import BaseDialog from '@/components/common/BaseDialog.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
 import { useAppStore } from '@/stores'
+import OpsSystemLogTable from './ops/components/OpsSystemLogTable.vue'
 
 const { t } = useI18n()
 const appStore = useAppStore()
+const route = useRoute()
+const activeLog = computed(() => route.query.tab === 'debug' ? 'debug' : 'audit')
+const logLocation = (tab: 'audit' | 'debug') => ({
+  path: route.path,
+  query: { ...route.query, tab: tab === 'debug' ? 'debug' : undefined },
+  hash: route.hash
+})
 
 const loading = ref(false)
 const logs = ref<AuditLog[]>([])
@@ -681,5 +709,14 @@ function statusDotClass(status: number): string {
   return 'bg-green-500'
 }
 
-onMounted(fetchLogs)
+watch(activeLog, (tab) => {
+  detailVisible.value = false
+  showCustomTimeRangeDialog.value = false
+  clearConfirmVisible.value = false
+  clearTotpVisible.value = false
+  if (tab === 'audit') void fetchLogs()
+})
+onMounted(() => {
+  if (activeLog.value === 'audit') void fetchLogs()
+})
 </script>

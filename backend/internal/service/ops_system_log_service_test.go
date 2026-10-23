@@ -108,6 +108,7 @@ func TestOpsServiceCleanupSystemLogs_SuccessAndAudit(t *testing.T) {
 		UserID:          &userID,
 		APIKeyID:        &apiKeyID,
 		Query:           "timeout",
+		Event:           "openai.messages_ws_latency",
 	}
 
 	deleted, err := svc.CleanupSystemLogs(context.Background(), filter, 99)
@@ -119,6 +120,9 @@ func TestOpsServiceCleanupSystemLogs_SuccessAndAudit(t *testing.T) {
 	}
 	if audit == nil {
 		t.Fatalf("expected cleanup audit")
+	}
+	if !strings.Contains(audit.Conditions, `"event":"openai.messages_ws_latency"`) {
+		t.Fatalf("audit conditions should include event: %s", audit.Conditions)
 	}
 	if !strings.Contains(audit.Conditions, `"host":"api-node-1"`) {
 		t.Fatalf("audit conditions should include host: %s", audit.Conditions)

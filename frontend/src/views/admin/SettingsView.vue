@@ -9,7 +9,7 @@
       </div>
 
       <!-- Settings Form -->
-      <form v-else @submit.prevent="saveSettings" class="space-y-6" novalidate>
+      <form v-else @submit.prevent="activeTab !== 'debugLogs' && saveSettings()" class="space-y-6" novalidate>
         <!-- Tab Navigation -->
         <div class="settings-tabs-shell">
           <nav
@@ -8935,8 +8935,13 @@
           <BackupSettings />
         </div>
 
+        <!-- Debug logs own their runtime save actions and lifecycle. -->
+        <div v-if="activeTab === 'debugLogs'">
+          <OpsSystemLogTable diagnostics-mode />
+        </div>
+
         <!-- Save Button -->
-        <div v-show="activeTab !== 'backup'" class="settings-save-bar flex justify-end">
+        <div v-show="activeTab !== 'backup' && activeTab !== 'debugLogs'" class="settings-save-bar flex justify-end">
           <button
             type="submit"
             :disabled="saving || loadFailed"
@@ -9011,6 +9016,7 @@
 <script setup lang="ts">
 import CodexTicketCadenceSettings from '@/components/admin/account/CodexTicketCadenceSettings.vue'
 import OpenAIFastBridgeSettings from '@/components/admin/settings/OpenAIFastBridgeSettings.vue'
+import OpsSystemLogTable from './ops/components/OpsSystemLogTable.vue'
 import { ref, reactive, computed, onMounted, watch } from "vue";
 import { listPlatformIds } from "@/constants/platformCatalog";
 import { useI18n } from "vue-i18n";
@@ -9135,7 +9141,8 @@ type SettingsTab =
   | "gateway"
   | "payment"
   | "email"
-  | "backup";
+  | "backup"
+  | "debugLogs";
 const activeTab = ref<SettingsTab>("general");
 const codexTicketCadenceRef = ref<InstanceType<typeof CodexTicketCadenceSettings> | null>(null);
 const settingsTabs = [
@@ -9148,6 +9155,7 @@ const settingsTabs = [
   { key: "payment" as SettingsTab, icon: "creditCard" as const },
   { key: "email" as SettingsTab, icon: "mail" as const },
   { key: "backup" as SettingsTab, icon: "database" as const },
+  { key: "debugLogs" as SettingsTab, icon: "document" as const },
 ];
 
 const settingsTabKeyboardActions = {

@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useMediaQuery } from '@vueuse/core'
 import { useI18n } from 'vue-i18n'
 import LogRetentionSelect from './LogRetentionSelect.vue'
-import { opsAPI, type OpsRuntimeLogConfig, type OpsSystemLog, type OpsSystemLogSinkHealth } from '@/api/admin/ops'
+import { opsAPI, type OpsRuntimeLogConfig, type OpsSystemLog, type OpsSystemLogSinkHealth, type OpsSystemLogQuery } from '@/api/admin/ops'
+import RequestDiagnosticDetails from './RequestDiagnosticDetails.vue'
+import BaseDialog from '@/components/common/BaseDialog.vue'
 import Pagination from '@/components/common/Pagination.vue'
 import Select from '@/components/common/Select.vue'
 import { useAppStore } from '@/stores'
@@ -18,9 +20,11 @@ const isDesktopViewport = useMediaQuery('(min-width: 768px)')
 const props = withDefaults(defineProps<{
   platformFilter?: string
   refreshToken?: number
+  diagnosticsMode?: boolean
 }>(), {
   platformFilter: '',
-  refreshToken: 0
+  refreshToken: 0,
+  diagnosticsMode: false
 })
 
 const loading = ref(false)
@@ -41,17 +45,26 @@ const health = ref<OpsSystemLogSinkHealth>({
 const runtimeLoading = ref(false)
 const runtimeConfigLoaded = ref(false)
 const runtimeSaving = ref(false)
-const runtimeConfig = reactive<OpsRuntimeLogConfig>({
+const runtimeConfig = reactive<OpsRuntimeLogConfig & { diagnostic_retention_days: number; diagnostic_max_size_mb: number }>({
   level: 'info',
   persist_access_logs: false,
+  persist_request_diagnostics: false,
   enable_sampling: false,
   sampling_initial: 100,
   sampling_thereafter: 100,
   caller: true,
   stacktrace_level: 'error',
   retention_days: 30,
-  request_retention_days: 90
+  request_retention_days: 90,
+  diagnostic_retention_days: 7,
+  diagnostic_max_size_mb: 0
 })
+const savedDiagnosticPolicy = ref({ days: 7, maxSizeMB: 0 })
+function loadDiagnosticPolicy(cfg: OpsRuntimeLogConfig) {
+  runtimeConfig.diagnostic_retention_days = cfg.diagnostic_retention_days ?? 7
+  runtimeConfig.diagnostic_max_size_mb = cfg.diagnostic_max_size_mb ?? 0
+  savedDiagnosticPolicy.value = { days: runtimeConfig.diagnostic_retention_days, maxSizeMB: runtimeConfig.diagnostic_max_size_mb }
+}
 
 const filters = reactive({
   time_range: '1h' as '5m' | '30m' | '1h' | '6h' | '24h' | '7d' | '30d',
@@ -174,7 +187,7 @@ const toRFC3339 = (value: string) => {
 }
 
 const buildQuery = () => {
-  const query: Record<string, any> = {
+  const query: OpsSystemLogQuery = {
     page: page.value,
     page_size: pageSize.value,
     time_range: filters.time_range
@@ -205,28 +218,167 @@ const buildQuery = () => {
   if (filters.platform.trim()) query.platform = filters.platform.trim()
   if (filters.model.trim()) query.model = filters.model.trim()
   if (filters.q.trim()) query.q = filters.q.trim()
+  if (preset.value === 'diagnostics') query.event = DIAGNOSTIC_EVENT
+  if (preset.value === 'access') query.component = 'http.access'
   return query
 }
 
+const DIAGNOSTIC_EVENT = 'openai.messages_ws_latency'
+type LogPreset = 'all' | 'diagnostics' | 'access'
+const preset = ref<LogPreset>(props.diagnosticsMode ? 'diagnostics' : 'all')
+const presetOptions = computed(() => [
+  { value: 'all', label: t('admin.ops.systemLogs.presetAll') },
+  { value: 'diagnostics', label: t('admin.ops.systemLogs.presetDiagnostics') },
+  { value: 'access', label: t('admin.ops.systemLogs.presetAccess') }
+])
+const isDiagnostic = (row: OpsSystemLog) => row.extra?.event === DIAGNOSTIC_EVENT || row.message === DIAGNOSTIC_EVENT
+const selectedLog = ref<OpsSystemLog | null>(null)
+const liveEnabled = ref(props.diagnosticsMode)
+const manuallyPaused = ref(false)
+const visible = ref(document.visibilityState !== 'hidden')
+const loadError = ref(false)
+const opsDisabled = ref(false)
+const failureCount = ref(0)
+const lastUpdated = ref('')
+const appliedQuery = ref<OpsSystemLogQuery>({})
+type TimeBounds = { start_time: string; end_time: string }
+let displayedBounds: TimeBounds | null = null
+let frozenBounds: TimeBounds | null = null
+let pollTimer: ReturnType<typeof setTimeout> | undefined
+let generation = 0
+let inFlight = false
+let pending = false
+let disposed = false
+const canPoll = () => liveEnabled.value && visible.value && page.value === 1 && !selectedLog.value && !opsDisabled.value && !disposed
+const liveStatus = computed(() => {
+  if (opsDisabled.value) return 'monitoringDisabled'
+  if (!liveEnabled.value) return 'livePaused'
+  if (!visible.value) return 'liveHidden'
+  if (selectedLog.value) return 'liveDetails'
+  if (page.value !== 1) return 'liveOlderPage'
+  return failureCount.value ? 'liveRetrying' : 'liveActive'
+})
+
+function clearPoll() {
+  if (pollTimer !== undefined) clearTimeout(pollTimer)
+  pollTimer = undefined
+}
+function invalidate() {
+  clearPoll()
+  generation++
+  pending = false
+  loading.value = false
+}
+function boundsForQuery(): TimeBounds {
+  if (frozenBounds) return frozenBounds
+  const query = appliedQuery.value
+  const end = query.end_time ? new Date(query.end_time).getTime() : Date.now()
+  const ranges = { '5m': 300000, '30m': 1800000, '1h': 3600000, '6h': 21600000, '24h': 86400000, '7d': 604800000, '30d': 2592000000 }
+  return {
+    start_time: query.start_time || new Date(end - ranges[query.time_range || '1h']).toISOString(),
+    end_time: new Date(end).toISOString()
+  }
+}
+function freeze() {
+  frozenBounds = displayedBounds || boundsForQuery()
+  invalidate()
+}
+function schedulePoll() {
+  clearPoll()
+  if (canPoll()) pollTimer = setTimeout(() => { void fetchLogs() }, Math.min(30000, 2000 * 2 ** Math.min(failureCount.value, 4)))
+}
+function handleDisabled(err: unknown): boolean {
+  if (typeof err === 'object' && err !== null && 'code' in err && err.code === 'OPS_DISABLED') {
+    opsDisabled.value = true
+    invalidate()
+    return true
+  }
+  return false
+}
+
+// One worker for all refresh sources: serialize requests and reject stale generations.
 const fetchLogs = async () => {
-  loading.value = true
+  if (disposed || opsDisabled.value) return
+  clearPoll()
+  generation++
+  pending = true
+  if (inFlight) return
+  inFlight = true
   try {
-    const res = await opsAPI.listSystemLogs(buildQuery())
-    logs.value = res.items || []
-    total.value = res.total || 0
-  } catch (err: any) {
-    console.error('[OpsSystemLogTable] Failed to fetch logs', err)
-    appStore.showError(err?.response?.data?.detail || t('admin.ops.systemLogs.loadFailed'))
+    while (pending && !disposed && !opsDisabled.value) {
+      pending = false
+      const ownGeneration = generation
+      const bounds = boundsForQuery()
+      const query = { ...appliedQuery.value, ...bounds, page: page.value, page_size: pageSize.value }
+      loading.value = logs.value.length === 0
+      try {
+        const res = await opsAPI.listSystemLogs(query)
+        if (disposed || ownGeneration !== generation) continue
+        logs.value = res.items || []
+        total.value = res.total || 0
+        displayedBounds = bounds
+        lastUpdated.value = new Date().toISOString()
+        failureCount.value = 0
+        loadError.value = false
+      } catch (err: unknown) {
+        if (disposed || ownGeneration !== generation) continue
+        if (!handleDisabled(err)) {
+          loadError.value = true
+          failureCount.value++
+        }
+      } finally {
+        if (ownGeneration === generation) loading.value = false
+      }
+    }
   } finally {
-    loading.value = false
+    inFlight = false
+    if (!disposed) schedulePoll()
+  }
+}
+
+function pauseLive() {
+  manuallyPaused.value = true
+  liveEnabled.value = false
+  freeze()
+}
+function resumeLatest() {
+  manuallyPaused.value = false
+  selectedLog.value = null
+  page.value = 1
+  filters.end_time = ''
+  appliedQuery.value = { ...appliedQuery.value, end_time: undefined }
+  frozenBounds = null
+  liveEnabled.value = true
+  void fetchLogs()
+}
+function openDetails(row: OpsSystemLog) {
+  selectedLog.value = row
+  freeze()
+}
+function closeDetails() {
+  selectedLog.value = null
+  if (canPoll()) {
+    frozenBounds = null
+    void fetchLogs()
+  }
+}
+function onVisibilityChange() {
+  visible.value = document.visibilityState !== 'hidden'
+  if (!liveEnabled.value) return
+  if (!visible.value) freeze()
+  else if (canPoll()) {
+    frozenBounds = null
+    void fetchLogs()
   }
 }
 
 const fetchHealth = async () => {
   try {
-    health.value = await opsAPI.getSystemLogSinkHealth()
-  } catch {
-    // 忽略健康数据读取失败，不影响主流程。
+    const result = await opsAPI.getSystemLogSinkHealth()
+    if (!disposed) health.value = result
+  } catch (err: unknown) {
+    if (!disposed) handleDisabled(err)
+    // Health is supplementary; never toast on background failures.
   }
 }
 
@@ -235,7 +387,9 @@ const loadRuntimeConfig = async () => {
   runtimeConfigLoaded.value = false
   try {
     const cfg = await opsAPI.getRuntimeLogConfig()
+    if (disposed) return
     runtimeConfig.level = cfg.level
+    runtimeConfig.persist_request_diagnostics = cfg.persist_request_diagnostics ?? false
     runtimeConfig.persist_access_logs = cfg.persist_access_logs
     runtimeConfig.enable_sampling = cfg.enable_sampling
     runtimeConfig.sampling_initial = cfg.sampling_initial
@@ -244,10 +398,11 @@ const loadRuntimeConfig = async () => {
     runtimeConfig.stacktrace_level = cfg.stacktrace_level
     runtimeConfig.retention_days = cfg.retention_days
     runtimeConfig.request_retention_days = cfg.request_retention_days ?? 90
+    loadDiagnosticPolicy(cfg)
     runtimeConfigLoaded.value = true
   } catch (err: any) {
     console.error('[OpsSystemLogTable] Failed to load runtime log config', err)
-    appStore.showError(t('admin.ops.systemLogs.runtimeConfigLoadFailed'))
+    if (!disposed && !handleDisabled(err)) appStore.showError(t('admin.ops.systemLogs.runtimeConfigLoadFailed'))
   } finally {
     runtimeLoading.value = false
   }
@@ -260,10 +415,21 @@ const saveRuntimeConfig = async () => {
     appStore.showError(t('admin.ops.systemLogs.retentionDaysInvalid'))
     return
   }
+  const days = runtimeConfig.diagnostic_retention_days
+  const maxSizeMB = runtimeConfig.diagnostic_max_size_mb
+  if (days == null || !Number.isInteger(days) || days < 1 || days > 3650 ||
+      maxSizeMB == null || !Number.isInteger(maxSizeMB) || maxSizeMB < 0 || maxSizeMB > 102400) {
+    appStore.showError(t('admin.ops.systemLogs.diagnosticPolicyInvalid'))
+    return
+  }
+  const previous = savedDiagnosticPolicy.value
+  if ((days < previous.days || (maxSizeMB > 0 && (previous.maxSizeMB === 0 || maxSizeMB < previous.maxSizeMB))) &&
+      !window.confirm(t('admin.ops.systemLogs.diagnosticPolicyConfirm'))) return
   runtimeSaving.value = true
   try {
     const saved = await opsAPI.updateRuntimeLogConfig({ ...runtimeConfig })
     runtimeConfig.level = saved.level
+    runtimeConfig.persist_request_diagnostics = saved.persist_request_diagnostics ?? false
     runtimeConfig.persist_access_logs = saved.persist_access_logs
     runtimeConfig.enable_sampling = saved.enable_sampling
     runtimeConfig.sampling_initial = saved.sampling_initial
@@ -272,10 +438,11 @@ const saveRuntimeConfig = async () => {
     runtimeConfig.stacktrace_level = saved.stacktrace_level
     runtimeConfig.retention_days = saved.retention_days
     runtimeConfig.request_retention_days = saved.request_retention_days ?? 90
+    loadDiagnosticPolicy(saved)
     appStore.showSuccess(t('admin.ops.systemLogs.runtimeConfigActive'))
   } catch (err: any) {
     console.error('[OpsSystemLogTable] Failed to save runtime log config', err)
-    appStore.showError(err?.response?.data?.detail || t('admin.ops.systemLogs.runtimeConfigSaveFailed'))
+    if (!handleDisabled(err)) appStore.showError(err?.response?.data?.detail || t('admin.ops.systemLogs.runtimeConfigSaveFailed'))
   } finally {
     runtimeSaving.value = false
   }
@@ -289,6 +456,7 @@ const resetRuntimeConfig = async () => {
   try {
     const saved = await opsAPI.resetRuntimeLogConfig()
     runtimeConfig.level = saved.level
+    runtimeConfig.persist_request_diagnostics = saved.persist_request_diagnostics ?? false
     runtimeConfig.persist_access_logs = saved.persist_access_logs
     runtimeConfig.enable_sampling = saved.enable_sampling
     runtimeConfig.sampling_initial = saved.sampling_initial
@@ -297,35 +465,27 @@ const resetRuntimeConfig = async () => {
     runtimeConfig.stacktrace_level = saved.stacktrace_level
     runtimeConfig.retention_days = saved.retention_days
     runtimeConfig.request_retention_days = saved.request_retention_days ?? 90
+    loadDiagnosticPolicy(saved)
     appStore.showSuccess(t('admin.ops.systemLogs.runtimeConfigReset'))
     await fetchHealth()
   } catch (err: any) {
     console.error('[OpsSystemLogTable] Failed to reset runtime log config', err)
-    appStore.showError(err?.response?.data?.detail || t('admin.ops.systemLogs.runtimeConfigResetFailed'))
+    if (!handleDisabled(err)) appStore.showError(err?.response?.data?.detail || t('admin.ops.systemLogs.runtimeConfigResetFailed'))
   } finally {
     runtimeSaving.value = false
   }
 }
 
 const cleanupCurrentFilter = async () => {
+  if (opsDisabled.value) return
   const ok = window.confirm(t('admin.ops.systemLogs.cleanupConfirm'))
   if (!ok) return
   try {
-    const payload = {
-      start_time: toRFC3339(filters.start_time),
-      end_time: toRFC3339(filters.end_time),
-      host: filters.host.trim() || undefined,
-      level: filters.level.trim() || undefined,
-      component: filters.component.trim() || undefined,
-      request_id: filters.request_id.trim() || undefined,
-      client_request_id: filters.client_request_id.trim() || undefined,
-      user_id: filters.user_id.trim() ? Number.parseInt(filters.user_id.trim(), 10) : undefined,
-      api_key_id: filters.api_key_id.trim() ? Number.parseInt(filters.api_key_id.trim(), 10) : undefined,
-      account_id: filters.account_id.trim() ? Number.parseInt(filters.account_id.trim(), 10) : undefined,
-      platform: filters.platform.trim() || undefined,
-      model: filters.model.trim() || undefined,
-      q: filters.q.trim() || undefined
-    }
+    // Clean the applied preset and displayed window, not broader unsaved filter drafts.
+    const payload = { ...appliedQuery.value, ...(displayedBounds || boundsForQuery()) }
+    delete payload.page
+    delete payload.page_size
+    delete payload.time_range
     const res = await opsAPI.cleanupSystemLogs(payload)
     appStore.showSuccess(t('admin.ops.systemLogs.cleanupSuccess', { count: res.deleted || 0 }))
     page.value = 1
@@ -355,55 +515,75 @@ const resetFilters = () => {
   filters.platform = props.platformFilter || ''
   filters.model = ''
   filters.q = ''
-  page.value = 1
-  fetchLogs()
+  if (preset.value !== 'all') preset.value = 'all'
+  else applyFilters()
 }
 
 watch(() => props.platformFilter, (v) => {
   if (v && !filters.platform) {
     filters.platform = v
-    page.value = 1
-    fetchLogs()
+    applyFilters()
   }
 })
 
 watch(() => props.refreshToken, () => {
-  fetchLogs()
-  fetchHealth()
+  // Ops dashboard owns refresh unless this table's Live worker is active.
+  if (props.diagnosticsMode || liveEnabled.value || manuallyPaused.value || page.value !== 1 || selectedLog.value) return
+  void fetchLogs()
+  void fetchHealth()
 })
 
 const onPageChange = (next: number) => {
+  if (next !== 1) freeze()
+  else if (liveEnabled.value) frozenBounds = null
   page.value = next
-  fetchLogs()
+  void fetchLogs()
 }
 
 const onPageSizeChange = (next: number) => {
   pageSize.value = next
   page.value = 1
-  fetchLogs()
+  if (liveEnabled.value) frozenBounds = null
+  void fetchLogs()
 }
 
 const applyFilters = () => {
+  invalidate()
   page.value = 1
-  fetchLogs()
+  selectedLog.value = null
+  frozenBounds = null
+  displayedBounds = null
+  appliedQuery.value = buildQuery()
+  if (filters.end_time) liveEnabled.value = false
+  void fetchLogs()
 }
-
+watch(preset, applyFilters)
 const hasData = computed(() => logs.value.length > 0)
 
 onMounted(async () => {
-  if (props.platformFilter) {
-    filters.platform = props.platformFilter
-  }
+  if (props.platformFilter) filters.platform = props.platformFilter
+  appliedQuery.value = buildQuery()
+  document.addEventListener('visibilitychange', onVisibilityChange)
   await Promise.all([fetchLogs(), fetchHealth(), loadRuntimeConfig()])
+})
+onUnmounted(() => {
+  disposed = true
+  invalidate()
+  document.removeEventListener('visibilitychange', onVisibilityChange)
 })
 </script>
 
 <template>
   <section class="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm dark:border-dark-700 dark:bg-dark-900/60">
+    <div v-if="opsDisabled" role="alert" class="rounded-lg bg-amber-50 p-4 text-sm text-amber-800 dark:bg-amber-900/20 dark:text-amber-200">
+      {{ t('admin.ops.systemLogs.monitoringDisabled') }}
+    </div>
+    <template v-else>
     <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
       <div>
-        <h3 class="text-sm font-bold text-gray-900 dark:text-white">{{ t('admin.ops.systemLogs.title') }}</h3>
+        <h3 class="text-sm font-bold text-gray-900 dark:text-white">{{ t(diagnosticsMode ? 'admin.ops.systemLogs.debugTitle' : 'admin.ops.systemLogs.title') }}</h3>
         <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.ops.systemLogs.description') }}</p>
+        <p class="mt-2 max-w-3xl text-xs text-gray-500 dark:text-gray-400">{{ t('admin.ops.systemLogs.diagnosticsHint') }}</p>
       </div>
       <div class="flex flex-wrap items-center gap-2 text-xs">
         <span class="rounded-md bg-gray-100 px-2 py-1 text-gray-700 dark:bg-dark-700 dark:text-gray-200">{{ t('admin.ops.systemLogs.queue') }} {{ health.queue_depth }}/{{ health.queue_capacity }}</span>
@@ -445,6 +625,23 @@ onMounted(async () => {
           <LogRetentionSelect v-model="runtimeConfig.request_retention_days" :label="t('admin.ops.systemLogs.requestRetentionDays')" allow-forever class="mt-1" />
           <span class="mt-1 block text-[11px] text-gray-500 dark:text-gray-400">{{ t('admin.ops.systemLogs.requestRetentionDaysHint') }}</span>
         </label>
+        <fieldset class="rounded-lg border border-gray-200 p-3 dark:border-dark-700 md:col-span-2 xl:col-span-6" data-testid="diagnostic-retention-policy">
+          <legend class="px-1 text-xs font-medium text-gray-700 dark:text-gray-200">{{ t('admin.ops.systemLogs.diagnosticPolicyTitle') }}</legend>
+          <div class="grid gap-4 sm:grid-cols-2">
+            <label class="text-xs text-gray-600 dark:text-gray-300">
+              {{ t('admin.ops.systemLogs.diagnosticRetentionDays') }}
+              <LogRetentionSelect v-model="runtimeConfig.diagnostic_retention_days" :label="t('admin.ops.systemLogs.diagnosticRetentionDays')" class="mt-1" data-testid="diagnostic-retention-days" />
+            </label>
+            <label class="text-xs text-gray-600 dark:text-gray-300">
+              {{ t('admin.ops.systemLogs.diagnosticMaxSizeMB') }}
+              <input v-model.number="runtimeConfig.diagnostic_max_size_mb" type="number" min="0" max="102400" step="1" class="input mt-1" data-testid="diagnostic-max-size-mb" />
+              <span class="mt-1 block text-[11px] text-gray-500 dark:text-gray-400">{{ t('admin.ops.systemLogs.diagnosticSizeHint') }}</span>
+            </label>
+          </div>
+          <p class="mt-2 text-xs leading-relaxed text-gray-500 dark:text-gray-400">{{ t('admin.ops.systemLogs.diagnosticPolicyHint') }}</p>
+          <p v-if="health.diagnostic_retention?.result?.scan_incomplete" role="alert" class="mt-2 text-xs text-amber-700 dark:text-amber-300" data-testid="diagnostic-retention-incomplete">{{ t('admin.ops.systemLogs.diagnosticPolicyIncomplete') }}</p>
+          <p v-if="health.diagnostic_retention?.last_error" role="alert" class="mt-2 text-xs text-red-600 dark:text-red-400">{{ t('admin.ops.systemLogs.diagnosticPolicyError') }}</p>
+        </fieldset>
         <div class="md:col-span-2 xl:col-span-6">
           <div class="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
             <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
@@ -460,6 +657,10 @@ onMounted(async () => {
                 <input v-model="runtimeConfig.persist_access_logs" type="checkbox" />
                 {{ t('admin.ops.systemLogs.persistAccessLogs') }}
               </label>
+              <label class="inline-flex items-center gap-2 text-xs text-gray-600 dark:text-gray-300">
+                <input v-model="runtimeConfig.persist_request_diagnostics" type="checkbox" data-testid="persist-request-diagnostics" />
+                {{ t('admin.ops.systemLogs.persistRequestDiagnostics') }}
+              </label>
             </div>
             <div class="flex flex-wrap items-center gap-2 lg:justify-end">
               <button type="button" class="btn btn-primary btn-sm" :disabled="runtimeSaving || runtimeLoading || !runtimeConfigLoaded" @click="saveRuntimeConfig">
@@ -473,8 +674,22 @@ onMounted(async () => {
         </div>
       </div>
       <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.ops.systemLogs.persistAccessLogsHint') }}</p>
+      <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.ops.systemLogs.persistRequestDiagnosticsHint') }}</p>
       <p v-if="health.last_error" class="mt-2 text-xs text-red-600 dark:text-red-400">{{ t('admin.ops.systemLogs.latestWriteError') }} {{ health.last_error }}</p>
     </div>
+
+    <div class="mb-4 flex flex-wrap items-end gap-3">
+      <label class="min-w-48 text-xs text-gray-600 dark:text-gray-300">
+        {{ t('admin.ops.systemLogs.preset') }}
+        <Select v-model="preset" class="mt-1" :options="presetOptions" data-testid="log-preset" />
+      </label>
+      <button v-if="liveEnabled" type="button" class="btn btn-secondary btn-sm" data-testid="pause-live" @click="pauseLive">{{ t('admin.ops.systemLogs.pauseLive') }}</button>
+      <button type="button" class="btn btn-secondary btn-sm" data-testid="resume-latest" @click="resumeLatest">{{ t('admin.ops.systemLogs.resumeLatest') }}</button>
+      <span class="text-xs text-gray-500 dark:text-gray-400" role="status">{{ t(`admin.ops.systemLogs.${liveStatus}`) }}</span>
+      <span v-if="lastUpdated" class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.ops.systemLogs.lastUpdated') }} {{ formatTime(lastUpdated) }}</span>
+    </div>
+    <p class="mb-3 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.ops.systemLogs.protocolHint') }}</p>
+    <div v-if="loadError" role="alert" class="mb-3 text-sm text-amber-700 dark:text-amber-300">{{ t('admin.ops.systemLogs.loadFailed') }} {{ t('admin.ops.systemLogs.retryHint') }}</div>
 
     <div class="mb-4 grid grid-cols-1 gap-3 md:grid-cols-5">
       <label class="text-xs text-gray-600 dark:text-gray-300">
@@ -495,7 +710,7 @@ onMounted(async () => {
       </label>
       <label class="text-xs text-gray-600 dark:text-gray-300">
         {{ t('admin.ops.systemLogs.component') }}
-        <input v-model="filters.component" type="text" class="input mt-1" :placeholder="t('admin.ops.systemLogs.componentPlaceholder')" />
+        <input v-model="filters.component" type="text" :disabled="preset === 'access'" class="input mt-1" :placeholder="t('admin.ops.systemLogs.componentPlaceholder')" />
       </label>
       <label class="text-xs text-gray-600 dark:text-gray-300">
         {{ t('admin.ops.systemLogs.host') }}
@@ -557,7 +772,11 @@ onMounted(async () => {
             {{ row.host }}
           </div>
           <div class="whitespace-normal break-all text-xs text-gray-700 dark:text-gray-300">
-            {{ formatSystemLogDetail(row) }}
+            <template v-if="isDiagnostic(row)">
+              <RequestDiagnosticDetails :row="row" summary />
+              <button type="button" class="btn btn-secondary btn-sm mt-2" data-testid="diagnostic-details" @click="openDetails(row)">{{ t('admin.ops.systemLogs.phaseDetails') }}</button>
+            </template>
+            <template v-else>{{ formatSystemLogDetail(row) }}</template>
           </div>
         </div>
       </div>
@@ -583,7 +802,11 @@ onMounted(async () => {
                 </span>
               </td>
               <td class="px-3 py-2 text-xs text-gray-700 dark:text-gray-300 whitespace-normal break-all">
-                {{ formatSystemLogDetail(row) }}
+                <template v-if="isDiagnostic(row)">
+                  <RequestDiagnosticDetails :row="row" summary />
+                  <button type="button" class="btn btn-secondary btn-sm mt-2" data-testid="diagnostic-details" @click="openDetails(row)">{{ t('admin.ops.systemLogs.phaseDetails') }}</button>
+                </template>
+                <template v-else>{{ formatSystemLogDetail(row) }}</template>
               </td>
             </tr>
           </tbody>
@@ -597,5 +820,12 @@ onMounted(async () => {
         @update:page-size="onPageSizeChange"
       />
     </div>
+    <BaseDialog :show="selectedLog !== null" :title="t('admin.ops.systemLogs.phaseDetails')" width="extra-wide" @close="closeDetails">
+      <div v-if="selectedLog" class="space-y-4">
+        <p class="text-xs text-gray-500 dark:text-gray-400">{{ formatTime(selectedLog.created_at) }} / {{ selectedLog.host || t('admin.ops.systemLogs.notRecorded') }}</p>
+        <RequestDiagnosticDetails :row="selectedLog" />
+      </div>
+    </BaseDialog>
+    </template>
   </section>
 </template>
