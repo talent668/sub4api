@@ -14,6 +14,15 @@ import (
 
 type diagnosticCapabilitySink struct{ enabled bool }
 
+func requireDiagnosticType[T any](t *testing.T, value any) T {
+	t.Helper()
+	typed, ok := value.(T)
+	if !ok {
+		t.Fatalf("unexpected diagnostic value type: %T", value)
+	}
+	return typed
+}
+
 func (*diagnosticCapabilitySink) WriteLogEvent(*LogEvent)           {}
 func (s *diagnosticCapabilitySink) RequestDiagnosticsEnabled() bool { return s.enabled }
 
@@ -51,7 +60,7 @@ func TestSafeRequestDiagnosticContextFields(t *testing.T) {
 	if len(fields) != 4 || fields["request_id"] != "req-123" || fields["user_id"] != int64(7) || fields["platform"] != "openai" {
 		t.Fatalf("unexpected safe metadata: %#v", fields)
 	}
-	if got := SafeRequestDiagnosticContextFields(IntoContext(nil, zap.NewNop())); got == nil || len(got) != 0 {
+	if got := SafeRequestDiagnosticContextFields(IntoContext(context.Background(), zap.NewNop())); got == nil || len(got) != 0 {
 		t.Fatalf("unsupported logger should return empty nonnil map: %#v", got)
 	}
 }
@@ -158,9 +167,12 @@ func TestProjectRequestDiagnosticSnapshots_UnknownNestedCyclesAndDetached(t *tes
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected safe projection: %#v", got)
 	}
-	got["client_request"].(map[string]any)["thinking"].(map[string]any)["type"] = "disabled"
-	got["upstream_request_headers"].(map[string]any)["openai_beta"].([]string)[0] = "changed"
-	if input["client_request"].(map[string]any)["thinking"].(map[string]any)["type"] != "enabled" || betas[0] != "responses_websockets=2026-02-06" {
+	clientRequest := requireDiagnosticType[map[string]any](t, got["client_request"])
+	requireDiagnosticType[map[string]any](t, clientRequest["thinking"])["type"] = "disabled"
+	upstreamHeaders := requireDiagnosticType[map[string]any](t, got["upstream_request_headers"])
+	requireDiagnosticType[[]string](t, upstreamHeaders["openai_beta"])[0] = "changed"
+	inputRequest := requireDiagnosticType[map[string]any](t, input["client_request"])
+	if requireDiagnosticType[map[string]any](t, inputRequest["thinking"])["type"] != "enabled" || betas[0] != "responses_websockets=2026-02-06" {
 		t.Fatal("projection aliases input maps or slices")
 	}
 }
@@ -183,7 +195,7 @@ func TestProjectRequestDiagnosticSnapshots_MalformedOptionalSections(t *testing.
 		"upstream_request": map[string]any{"store": false, "write_attempted": false, "write_completed": false},
 		"usage":            map[string]any{"input_tokens": 0},
 	})
-	if len(got) != 3 || len(got["client_request"].(map[string]any)) != 2 || len(got["upstream_request"].(map[string]any)) != 3 || len(got["usage"].(map[string]any)) != 1 {
+	if len(got) != 3 || len(requireDiagnosticType[map[string]any](t, got["client_request"])) != 2 || len(requireDiagnosticType[map[string]any](t, got["upstream_request"])) != 3 || len(requireDiagnosticType[map[string]any](t, got["usage"])) != 1 {
 		t.Fatalf("zero/false lost or absent fields defaulted: %#v", got)
 	}
 }

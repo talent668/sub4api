@@ -22,6 +22,15 @@ Sub4API 基于 sub2api 二次开发，完全兼容 sub2api，并会持续同步�
 
 已部署 sub2api 的用户，只需将应用镜像替换为 `ghcr.io/talent668/sub4api:latest` 并重新创建应用容器，即可沿用原有配置与数据切换到 Sub4API。
 
+## 开发分支
+
+后续功能开发与修复基于 `dev` 分支。当前开发基线合并了本仓库的
+`release/1.1.14`（`a65ae5381`）和 `Wei-Shaw/sub2api` v0.2.18
+（`5c185c5c5`），上游同步记录见 [upstream-sync.json](.github/upstream-sync.json)。
+
+开发环境使用 Go 1.27.3 和 pnpm 9.15.9。升级后，综合分组的图片生成能力需由管理员显式开启；
+已有 Gemini / Antigravity 分组通过迁移保留图片生成权限，Grok 4.7 Fast 按上游修正后的价格计费。
+
 ## 相比 sub2api 的主要改进
 
 ### 1. Codex 打票与票据管理

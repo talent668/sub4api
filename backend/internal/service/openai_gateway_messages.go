@@ -373,9 +373,8 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	// failures before downstream output can safely use the existing HTTP path.
 	if bridgeDecision, bridgeOK := s.resolveAnthropicMessagesWSBridge(ctx, account, upstreamModel, responsesBody); bridgeOK {
 		bridgeReqBody, decodeErr := selectOpenAIMessagesWSRequestBody(responsesBody, codexReqBody, codexBodySnapshot)
-		// WS preparation may mutate nested maps. Consume the retained map once;
-		// HTTP fallback and billing continue using the immutable final body bytes.
-		codexReqBody, codexBodySnapshot = nil, nil
+		// WS preparation may mutate nested maps. This is the last use of the
+		// retained map; HTTP fallback and billing use immutable final body bytes.
 		if decodeErr == nil && bridgeReqBody != nil {
 			bridgeReasoningEffort := ""
 			if responsesReq.Reasoning != nil {

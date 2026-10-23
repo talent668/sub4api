@@ -256,11 +256,12 @@ func TestMaintainRequestDiagnosticLogsErrorRollsBackAllCounts(t *testing.T) {
 						mock.ExpectQuery(requestDiagnosticRetentionLockSQL).WithArgs(requestDiagnosticRetentionLockKey).WillReturnError(boom)
 					} else {
 						mock.ExpectQuery(requestDiagnosticRetentionLockSQL).WithArgs(requestDiagnosticRetentionLockKey).WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(true))
-						if phase == "age" {
+						switch phase {
+						case "age":
 							mock.ExpectExec(requestDiagnosticExpiredDeleteSQL).WillReturnError(boom)
-						} else if phase == "affected" {
+						case "affected":
 							mock.ExpectExec(requestDiagnosticExpiredDeleteSQL).WillReturnResult(sqlmock.NewErrorResult(boom))
-						} else {
+						default:
 							diagnosticRetentionExpectAge(mock, now, 7, 2)
 							scan := mock.ExpectQuery(requestDiagnosticSizeFirstPageSQL).WithArgs(requestDiagnosticRetentionBatchSize)
 							switch phase {

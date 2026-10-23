@@ -94,7 +94,7 @@ func TestSelectOpenAIMessagesWSRequestBody_FinalPolicies(t *testing.T) {
 			finalBefore := bytes.Clone(finalBody)
 			selected, err := selectOpenAIMessagesWSRequestBody(finalBody, retained, snapshot)
 			require.NoError(t, err)
-			require.Equal(t, tt.wantEffort, selected["reasoning"].(map[string]any)["effort"])
+			require.Equal(t, tt.wantEffort, requireMessagesPrepareType[map[string]any](t, selected["reasoning"])["effort"])
 			require.Equal(t, tt.wantTier, gjson.GetBytes(finalBody, "service_tier").String())
 			if tt.wantTier == "" {
 				require.NotContains(t, selected, "service_tier")
@@ -109,19 +109,28 @@ func TestSelectOpenAIMessagesWSRequestBody_FinalPolicies(t *testing.T) {
 			// HTTP fallback must still decode solely from the final policy bytes.
 			payload := svc.buildOpenAIWSCreatePayload(selected, account)
 			setOpenAIWSTurnMetadata(payload, "ws-only")
-			selected["input"].([]any)[0].(map[string]any)["role"] = "developer"
+			selectedInput := requireMessagesPrepareType[[]any](t, selected["input"])
+			requireMessagesPrepareType[map[string]any](t, selectedInput[0])["role"] = "developer"
 			require.Equal(t, snapshotBefore, snapshot)
 			require.Equal(t, finalBefore, finalBody)
 			fallback, err := selectOpenAIMessagesWSRequestBody(finalBody, nil, nil)
 			require.NoError(t, err)
-			require.Equal(t, tt.wantEffort, fallback["reasoning"].(map[string]any)["effort"])
-			require.Equal(t, "user", fallback["input"].([]any)[0].(map[string]any)["role"])
+			require.Equal(t, tt.wantEffort, requireMessagesPrepareType[map[string]any](t, fallback["reasoning"])["effort"])
+			fallbackInput := requireMessagesPrepareType[[]any](t, fallback["input"])
+			require.Equal(t, "user", requireMessagesPrepareType[map[string]any](t, fallbackInput[0])["role"])
 			require.NotContains(t, fallback["client_metadata"], openAIWSTurnMetadataHeader)
 		})
 	}
 }
 
 const openAIMessagesPrepareNumericSchema = `{"type":"object","properties":{"large":{"type":"integer","const":9007199254740993},"fraction":{"type":"number","multipleOf":0.1234567890123456789},"exponent":{"type":"number","maximum":1.234567890123456789e+40},"nested":{"type":"array","items":{"type":"object","properties":{"signed":{"enum":[-9007199254740993,2.5000,6.02214076e+23]}}}}}}`
+
+func requireMessagesPrepareType[T any](t *testing.T, value any) T {
+	t.Helper()
+	typed, ok := value.(T)
+	require.True(t, ok, "unexpected Messages preparation value type: %T", value)
+	return typed
+}
 
 func requireOpenAIMessagesPrepareNumericSchema(t *testing.T, body []byte) {
 	t.Helper()
@@ -157,7 +166,11 @@ func TestOpenAIMessagesPrepare_TransformNumbers(t *testing.T) {
 		}
 		selected, err := selectOpenAIMessagesWSRequestBody(finalBody, retained, snapshot)
 		require.NoError(t, err)
-		number := selected["tools"].([]any)[0].(map[string]any)["parameters"].(map[string]any)["properties"].(map[string]any)["large"].(map[string]any)["const"]
+		tools := requireMessagesPrepareType[[]any](t, selected["tools"])
+		tool := requireMessagesPrepareType[map[string]any](t, tools[0])
+		parameters := requireMessagesPrepareType[map[string]any](t, tool["parameters"])
+		properties := requireMessagesPrepareType[map[string]any](t, parameters["properties"])
+		number := requireMessagesPrepareType[map[string]any](t, properties["large"])["const"]
 		require.IsType(t, json.Number(""), number)
 		selectedBody, err := json.Marshal(selected)
 		require.NoError(t, err)

@@ -82,7 +82,7 @@ func safeDiagnosticLabel(value string, limit int) bool {
 		}
 	}
 	for _, ch := range value {
-		if !(ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || strings.ContainsRune("._:/-", ch)) {
+		if (ch < 'a' || ch > 'z') && (ch < 'A' || ch > 'Z') && (ch < '0' || ch > '9') && !strings.ContainsRune("._:/-", ch) {
 			return false
 		}
 	}
