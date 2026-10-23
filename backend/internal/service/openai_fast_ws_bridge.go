@@ -21,18 +21,10 @@ func fastTierRequiresWSUpstream(tier string) bool {
 	}
 }
 
-// resolveOpenAIFastWSBridgeDecision overrides the client-transport gate for
-// HTTP/SSE ingress when the request would otherwise be served at a fast tier
-// that the ChatGPT Codex HTTP endpoint silently downgrades to standard.
-//
-// The official Codex CLI always talks to the ChatGPT backend over the Responses
-// WebSocket, which is why Fast works there but not for HTTP/SSE downstreams
-// relayed through sub4api. The upstream WS branch in Forward already writes the
-// downstream response (SSE or JSON), so an HTTP ingress request can safely use
-// the WS upstream as long as the final payload is the one the policy produced.
-//
-// Only ChatGPT OAuth/Codex accounts are eligible: platform API-key HTTP
-// requests already get priority scheduling over HTTP.
+// resolveOpenAIFastWSBridgeDecision allows eligible HTTP ingress to use the
+// Responses WebSocket. The configured scope selects all tiers or Fast only;
+// transport selection never changes the final tier produced by policy.
+// Only ChatGPT OAuth/Codex accounts participate in this optional bridge.
 func (s *OpenAIGatewayService) resolveOpenAIFastWSBridgeDecision(
 	ctx context.Context,
 	c *gin.Context,
@@ -66,9 +58,8 @@ func (s *OpenAIGatewayService) resolveOpenAIFastWSBridgeDecision(
 	if model == "" {
 		return baseDecision, false
 	}
-	if !s.openAIFastBridgeEnabled(ctx) {
-		// Opt-in: keep the pre-existing HTTP forwarding unless the operator
-		// enables the web switch.
+	settings := s.openAIHTTPWSBridgeSettings(ctx)
+	if !settings.Enabled {
 		return baseDecision, false
 	}
 	// Evaluate the tier against the same upstream model Forward patches into
@@ -76,14 +67,18 @@ func (s *OpenAIGatewayService) resolveOpenAIFastWSBridgeDecision(
 	_, upstreamModel := resolveOpenAIForwardMappedModels(account, model, false)
 
 	tier := s.effectiveOpenAIServiceTierForTransport(ctx, account, upstreamModel, body)
-	if !fastTierRequiresWSUpstream(tier) {
+	if !openAIHTTPWSBridgeScopeAllowsTier(settings.Scope, tier) {
 		return baseDecision, false
 	}
 
 	if baseDecision.Transport == OpenAIUpstreamTransportResponsesWebsocketV2 {
+		reason := "fast_tier_http_bridge"
+		if settings.Scope == OpenAIFastBridgeScopeAll {
+			reason = "all_tiers_http_bridge"
+		}
 		return OpenAIWSProtocolDecision{
 			Transport: OpenAIUpstreamTransportResponsesWebsocketV2,
-			Reason:    "fast_tier_http_bridge",
+			Reason:    reason,
 		}, true
 	}
 
@@ -91,7 +86,8 @@ func (s *OpenAIGatewayService) resolveOpenAIFastWSBridgeDecision(
 	// Honor it even when the account-level WS switch is off, as long as global
 	// WS is usable; if the upstream WS dial fails, Forward falls back to HTTP so
 	// the request still completes (at standard tier) instead of failing.
-	if openAIGroupForcedServiceTier(ctx, account, upstreamModel) != "" &&
+	if fastTierRequiresWSUpstream(openAIGroupForcedServiceTier(ctx, account, upstreamModel)) &&
+		fastTierRequiresWSUpstream(tier) &&
 		s.openAIFastBridgeMayOverrideAccountSwitch(account, baseDecision.Reason) {
 		return OpenAIWSProtocolDecision{
 			Transport: OpenAIUpstreamTransportResponsesWebsocketV2,
@@ -101,14 +97,22 @@ func (s *OpenAIGatewayService) resolveOpenAIFastWSBridgeDecision(
 	return baseDecision, false
 }
 
-// openAIFastBridgeEnabled resolves the web-only opt-in switch. It has no
-// config/env fallback: the Admin Settings toggle is the single source of truth.
-// The value is served from the setting service's in-process cache.
-func (s *OpenAIGatewayService) openAIFastBridgeEnabled(ctx context.Context) bool {
+// openAIHTTPWSBridgeSettings reads one enabled/scope snapshot. Web settings are
+// the single source of truth; an unavailable settings service keeps HTTP.
+func (s *OpenAIGatewayService) openAIHTTPWSBridgeSettings(ctx context.Context) OpenAIFastBridgeSettings {
 	if s == nil || s.settingService == nil {
-		return false
+		return *DefaultOpenAIFastBridgeSettings()
 	}
-	return s.settingService.IsOpenAIFastBridgeEnabledCached(ctx)
+	return s.settingService.GetOpenAIFastBridgeSettingsCached(ctx)
+}
+
+func (s *OpenAIGatewayService) openAIFastBridgeEnabled(ctx context.Context) bool {
+	return s.openAIHTTPWSBridgeSettings(ctx).Enabled
+}
+
+func openAIHTTPWSBridgeScopeAllowsTier(scope, tier string) bool {
+	return scope == OpenAIFastBridgeScopeAll ||
+		(scope == OpenAIFastBridgeScopeFastOnly && fastTierRequiresWSUpstream(tier))
 }
 
 // openAIFastBridgeMayOverrideAccountSwitch reports whether a group-forced fast

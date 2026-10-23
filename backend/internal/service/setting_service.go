@@ -153,9 +153,11 @@ type SettingService struct {
 	panelRateLimitCache atomic.Value
 	panelRateLimitSF    singleflight.Group
 
-	// openAIFastBridgeEnabledCache HTTP fast -> WS 桥接开关进程内缓存（*cachedOpenAIFastBridgeEnabled）。
-	openAIFastBridgeEnabledCache atomic.Value
-	openAIFastBridgeEnabledSF    singleflight.Group
+	// Cache the complete bridge configuration so enabled and scope are always read together.
+	openAIFastBridgeSettingsCache atomic.Value // *cachedOpenAIFastBridgeSettings
+	openAIFastBridgeSettingsSF    singleflight.Group
+	// Serialize cache fills and saves so an older in-flight read cannot overwrite a save.
+	openAIFastBridgeSettingsMu sync.Mutex
 
 	// openAIQuotaAutoPauseSettingsCache holds the most recently observed quota auto-pause
 	// settings. GetOpenAIQuotaAutoPauseSettings reads this atomic.Value on the request hot

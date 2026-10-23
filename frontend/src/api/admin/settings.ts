@@ -1333,10 +1333,11 @@ export async function updateOverloadCooldownSettings(
 // ==================== OpenAI Fast Bridge Settings ====================
 
 /**
- * Opt-in HTTP/SSE Fast request bridge to the upstream Responses WebSocket.
+ * Opt-in HTTP/SSE request bridge to the upstream Responses WebSocket.
  */
 export interface OpenAIFastBridgeSettings {
   enabled: boolean;
+  scope: "all" | "fast_only";
 }
 
 export async function getOpenAIFastBridgeSettings(): Promise<OpenAIFastBridgeSettings> {

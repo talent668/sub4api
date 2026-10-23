@@ -715,7 +715,7 @@ func (s *SettingService) SetOverloadCooldownSettings(ctx context.Context, settin
 	return s.settingRepo.Set(ctx, SettingKeyOverloadCooldownSettings, string(data))
 }
 
-// GetOpenAIFastBridgeSettings 获取 HTTP fast -> WS 桥接开关（web 控制，默认关闭）
+// GetOpenAIFastBridgeSettings 获取 HTTP -> WS 桥接配置（web 控制，默认关闭）。
 func (s *SettingService) GetOpenAIFastBridgeSettings(ctx context.Context) (*OpenAIFastBridgeSettings, error) {
 	value, err := s.settingRepo.GetValue(ctx, SettingKeyOpenAIFastBridgeSettings)
 	if err != nil {
@@ -728,84 +728,136 @@ func (s *SettingService) GetOpenAIFastBridgeSettings(ctx context.Context) (*Open
 		return DefaultOpenAIFastBridgeSettings(), nil
 	}
 
-	var settings OpenAIFastBridgeSettings
-	if err := json.Unmarshal([]byte(value), &settings); err != nil {
+	// Existing JSON without scope uses all; adding scope never enables the bridge.
+	settings := DefaultOpenAIFastBridgeSettings()
+	if err := json.Unmarshal([]byte(value), settings); err != nil {
 		return DefaultOpenAIFastBridgeSettings(), nil
 	}
-	return &settings, nil
+	if settings.Scope != OpenAIFastBridgeScopeAll && settings.Scope != OpenAIFastBridgeScopeFastOnly {
+		return DefaultOpenAIFastBridgeSettings(), nil
+	}
+	return settings, nil
 }
 
-// SetOpenAIFastBridgeSettings 设置 HTTP fast -> WS 桥接开关
+// SetOpenAIFastBridgeSettings 设置 HTTP -> WS 桥接配置。
+// Empty scope is reserved for legacy Go callers and preserves the stored scope.
 func (s *SettingService) SetOpenAIFastBridgeSettings(ctx context.Context, settings *OpenAIFastBridgeSettings) error {
 	if settings == nil {
 		return fmt.Errorf("settings cannot be nil")
 	}
-	data, err := json.Marshal(settings)
+	var scope *string
+	if settings.Scope != "" {
+		scope = &settings.Scope
+	}
+	_, err := s.PatchOpenAIFastBridgeSettings(ctx, &settings.Enabled, scope)
+	return err
+}
+
+// PatchOpenAIFastBridgeSettings merges omitted fields with persisted settings under
+// the same lock as the save. Concurrent scope-only and enabled-only updates cannot
+// restore an old enable switch or discard a newly selected scope.
+func (s *SettingService) PatchOpenAIFastBridgeSettings(ctx context.Context, enabled *bool, scope *string) (*OpenAIFastBridgeSettings, error) {
+	if scope != nil && *scope != OpenAIFastBridgeScopeAll && *scope != OpenAIFastBridgeScopeFastOnly {
+		return nil, fmt.Errorf("scope must be all or fast_only")
+	}
+	s.openAIFastBridgeSettingsMu.Lock()
+	defer s.openAIFastBridgeSettingsMu.Unlock()
+	updated := DefaultOpenAIFastBridgeSettings()
+	if enabled == nil || scope == nil {
+		var err error
+		updated, err = s.GetOpenAIFastBridgeSettings(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if enabled != nil {
+		updated.Enabled = *enabled
+	}
+	if scope != nil {
+		updated.Scope = *scope
+	}
+	data, err := json.Marshal(updated)
 	if err != nil {
-		return fmt.Errorf("marshal openai fast bridge settings: %w", err)
+		return nil, fmt.Errorf("marshal openai fast bridge settings: %w", err)
 	}
 	if err := s.settingRepo.Set(ctx, SettingKeyOpenAIFastBridgeSettings, string(data)); err != nil {
-		return err
+		return nil, err
 	}
-	// 保存后立即刷新进程内缓存，当前节点下一个请求即生效（多节点最迟一个 TTL 内生效）。
-	s.storeOpenAIFastBridgeEnabledCache(settings.Enabled, openAIFastBridgeEnabledCacheTTL)
-	return nil
+	// Refresh both fields together; other nodes observe the save within one TTL.
+	s.storeOpenAIFastBridgeSettingsCache(*updated, openAIFastBridgeSettingsCacheTTL)
+	return updated, nil
 }
 
 const (
-	openAIFastBridgeEnabledCacheTTL  = 15 * time.Second
-	openAIFastBridgeEnabledErrorTTL  = 5 * time.Second
-	openAIFastBridgeEnabledDBTimeout = 5 * time.Second
+	openAIFastBridgeSettingsCacheTTL  = 15 * time.Second
+	openAIFastBridgeSettingsErrorTTL  = 5 * time.Second
+	openAIFastBridgeSettingsDBTimeout = 5 * time.Second
 )
 
-// cachedOpenAIFastBridgeEnabled 进程内缓存条目（短 TTL）。
-type cachedOpenAIFastBridgeEnabled struct {
-	enabled   bool
+type cachedOpenAIFastBridgeSettings struct {
+	settings  OpenAIFastBridgeSettings
 	expiresAt int64 // unix nano
 }
 
-// IsOpenAIFastBridgeEnabledCached 返回 HTTP fast -> WS 桥接开关（进程内缓存，短 TTL）。
-// 网关转发热路径调用，不能每个请求都访问 DB；读取失败时按「关闭」处理，并以短 TTL 重试。
-func (s *SettingService) IsOpenAIFastBridgeEnabledCached(ctx context.Context) bool {
+// GetOpenAIFastBridgeSettingsCached returns one immutable snapshot for the gateway hot path.
+// Read failures disable the bridge and are retried after a shorter TTL.
+func (s *SettingService) GetOpenAIFastBridgeSettingsCached(ctx context.Context) OpenAIFastBridgeSettings {
 	if s == nil || s.settingRepo == nil {
-		return false
+		return *DefaultOpenAIFastBridgeSettings()
 	}
-	if cached, ok := s.openAIFastBridgeEnabledCache.Load().(*cachedOpenAIFastBridgeEnabled); ok && cached != nil {
+	if cached, ok := s.openAIFastBridgeSettingsCache.Load().(*cachedOpenAIFastBridgeSettings); ok && cached != nil {
 		if time.Now().UnixNano() < cached.expiresAt {
-			return cached.enabled
+			return cached.settings
 		}
 	}
 
-	result, _, _ := s.openAIFastBridgeEnabledSF.Do("openai_fast_bridge_enabled", func() (any, error) {
-		// 二次检查，避免排队的 goroutine 重复查询
-		if cached, ok := s.openAIFastBridgeEnabledCache.Load().(*cachedOpenAIFastBridgeEnabled); ok && cached != nil {
+	result, _, _ := s.openAIFastBridgeSettingsSF.Do("openai_fast_bridge_settings", func() (any, error) {
+		// Hold the same lock as Set through the read and publication. A read started
+		// before a save must finish publishing before that save can publish its value.
+		s.openAIFastBridgeSettingsMu.Lock()
+		defer s.openAIFastBridgeSettingsMu.Unlock()
+		if cached, ok := s.openAIFastBridgeSettingsCache.Load().(*cachedOpenAIFastBridgeSettings); ok && cached != nil {
 			if time.Now().UnixNano() < cached.expiresAt {
-				return cached.enabled, nil
+				return cached.settings, nil
 			}
 		}
 		if ctx == nil {
 			ctx = context.Background()
 		}
-		// 独立 context：断开请求取消链，避免客户端断连污染缓存
-		dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), openAIFastBridgeEnabledDBTimeout)
+		// Detach request cancellation so a client disconnect cannot poison the cache.
+		dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), openAIFastBridgeSettingsDBTimeout)
 		defer cancel()
 
 		settings, err := s.GetOpenAIFastBridgeSettings(dbCtx)
 		if err != nil || settings == nil {
 			slog.Warn("failed to get openai fast bridge settings, treating bridge as disabled", "error", err)
-			s.storeOpenAIFastBridgeEnabledCache(false, openAIFastBridgeEnabledErrorTTL)
-			return false, nil
+			defaults := *DefaultOpenAIFastBridgeSettings()
+			s.storeOpenAIFastBridgeSettingsCache(defaults, openAIFastBridgeSettingsErrorTTL)
+			return defaults, nil
 		}
-		s.storeOpenAIFastBridgeEnabledCache(settings.Enabled, openAIFastBridgeEnabledCacheTTL)
-		return settings.Enabled, nil
+		s.storeOpenAIFastBridgeSettingsCache(*settings, openAIFastBridgeSettingsCacheTTL)
+		return *settings, nil
 	})
-	enabled, _ := result.(bool)
-	return enabled
+	// A save may publish after the singleflight function unlocks but before a
+	// waiting caller receives its result. Prefer that newer published snapshot.
+	if cached, ok := s.openAIFastBridgeSettingsCache.Load().(*cachedOpenAIFastBridgeSettings); ok && cached != nil {
+		return cached.settings
+	}
+	settings, ok := result.(OpenAIFastBridgeSettings)
+	if !ok {
+		return *DefaultOpenAIFastBridgeSettings()
+	}
+	return settings
 }
 
-func (s *SettingService) storeOpenAIFastBridgeEnabledCache(enabled bool, ttl time.Duration) {
-	s.openAIFastBridgeEnabledCache.Store(&cachedOpenAIFastBridgeEnabled{
-		enabled:   enabled,
+// IsOpenAIFastBridgeEnabledCached preserves the legacy boolean API.
+func (s *SettingService) IsOpenAIFastBridgeEnabledCached(ctx context.Context) bool {
+	return s.GetOpenAIFastBridgeSettingsCached(ctx).Enabled
+}
+
+func (s *SettingService) storeOpenAIFastBridgeSettingsCache(settings OpenAIFastBridgeSettings, ttl time.Duration) {
+	s.openAIFastBridgeSettingsCache.Store(&cachedOpenAIFastBridgeSettings{
+		settings:  settings,
 		expiresAt: time.Now().Add(ttl).UnixNano(),
 	})
 }

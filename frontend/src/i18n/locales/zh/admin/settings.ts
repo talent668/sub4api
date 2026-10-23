@@ -1078,14 +1078,18 @@ export default {
         saveFailed: '保存过载冷却设置失败'
       },
       openaiFastBridge: {
-        title: 'Fast WS 桥接',
-        description: '控制 HTTP/SSE 入站的 Fast / Ultra Fast 请求是否改走上游 Responses WebSocket',
-        enabled: '启用 Fast WS 桥接',
-        enabledHint: '仅对 ChatGPT OAuth/Codex 账号的 priority/ultrafast 请求生效；普通请求不受影响',
-        note: '默认关闭。HTTP 上游的 Fast 在部分环境下也可直接生效；只有确认 HTTP 未生效或需要对齐官方 WS 行为时再开启。',
-        saved: 'Fast WS 桥接设置保存成功',
-        saveFailed: '保存 Fast WS 桥接设置失败',
-        loadFailed: '加载 Fast WS 桥接设置失败'
+        title: 'HTTP→WS 桥接',
+        description: '控制符合条件的 HTTP/SSE Responses / Messages 请求是否改走上游 Responses WebSocket',
+        enabled: '启用 HTTP→WS 桥接',
+        enabledHint: '总开关默认关闭，触发范围默认全部。仅适用于 ChatGPT OAuth/Codex 账号；普通请求遵守账号 WS 关闭设置，分组强制 Fast 保留既有覆盖例外，显式 force_http 始终优先。关闭本开关不会清除已选范围。',
+        scope: '桥接范围',
+        scopeAll: '全部符合条件的请求（默认）',
+        scopeFastOnly: '仅 Fast / Ultra Fast 请求',
+        scopeHint: '全局范围覆盖符合条件的 Responses / Messages OAuth/Codex 请求（含 standard）；仅 Fast 范围限 priority/ultrafast。均不覆盖 Chat Completions、API Key、passthrough 或 compact 请求。',
+        note: '此设置只选择传输方式，不会将 standard 升级为 Fast，也不改变原有计费规则。独立的分组 Fast 策略仍可生效；Fast 也可通过 HTTP 生效，选择 WS 不保证 Fast 一定生效。',
+        saved: 'HTTP→WS 桥接设置保存成功',
+        saveFailed: '保存 HTTP→WS 桥接设置失败',
+        loadFailed: '加载 HTTP→WS 桥接设置失败'
       },
       rateLimit429Cooldown: {
         title: '429 默认回避',

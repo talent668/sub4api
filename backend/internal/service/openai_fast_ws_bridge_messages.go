@@ -30,11 +30,9 @@ func (s *OpenAIGatewayService) openAIFastWSBridgeServerAvailable() bool {
 // served by a ChatGPT OAuth/Codex account should use the upstream Responses WSv2
 // instead of the HTTP compat path.
 //
-// The ChatGPT Codex backend only schedules priority/ultrafast on the Responses
-// WebSocket; an HTTP Messages request carrying service_tier=priority is silently
-// downgraded. The tier is read from the final outbound body because group-forced
-// tiers, client-sent tiers and the missing-tier force switch have all been
-// applied by applyOpenAIFastPolicyToBody before this point.
+// The scope can include Standard as well as Fast. Read the tier from the final
+// outbound body: group/client tiers and missing-tier policies have already been
+// applied, and bridge selection must not evaluate or rewrite that policy again.
 //
 // Semantics mirror resolveOpenAIFastWSBridgeDecision: a client-sent fast tier
 // still respects the account-level WS switch, while a group-forced fast tier is
@@ -58,18 +56,20 @@ func (s *OpenAIGatewayService) resolveAnthropicMessagesWSBridge(
 	if account.IsOpenAIPassthroughEnabled() {
 		return base, false
 	}
-	if !s.openAIFastBridgeEnabled(ctx) {
+	settings := s.openAIHTTPWSBridgeSettings(ctx)
+	if !settings.Enabled {
 		return base, false
 	}
 	tier := normalizedOpenAIServiceTierValue(gjson.GetBytes(body, "service_tier").String())
-	if !fastTierRequiresWSUpstream(tier) {
+	if !openAIHTTPWSBridgeScopeAllowsTier(settings.Scope, tier) {
 		return base, false
 	}
 	base = s.getOpenAIWSProtocolResolver().Resolve(account)
 	if base.Transport == OpenAIUpstreamTransportResponsesWebsocketV2 {
 		return base, true
 	}
-	if openAIGroupForcedServiceTier(ctx, account, upstreamModel) != "" &&
+	if fastTierRequiresWSUpstream(openAIGroupForcedServiceTier(ctx, account, upstreamModel)) &&
+		fastTierRequiresWSUpstream(tier) &&
 		s.openAIFastBridgeMayOverrideAccountSwitch(account, base.Reason) {
 		return OpenAIWSProtocolDecision{
 			Transport: OpenAIUpstreamTransportResponsesWebsocketV2,

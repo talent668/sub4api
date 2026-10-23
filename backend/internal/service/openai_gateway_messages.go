@@ -355,10 +355,9 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		return nil, fmt.Errorf("get access token: %w", err)
 	}
 
-	// 5b. Fast / Ultra Fast 只有在 ChatGPT Codex 的 Responses WS 传输上才会被
-	// 真正调度；Messages 兼容桥默认走 HTTP，会把 priority 静默降级成 standard。
-	// 这里把 fast 请求桥接到上游 WSv2；WS 在任何下游字节写出前失败时回退到下面
-	// 的 HTTP 路径（本次按 standard 调度，请求仍然完成）。
+	// 5b. The optional HTTP→WS bridge covers all eligible tiers or Fast only,
+	// according to the web setting. The final policy-produced tier is unchanged;
+	// failures before downstream output can safely use the existing HTTP path.
 	if bridgeDecision, bridgeOK := s.resolveAnthropicMessagesWSBridge(ctx, account, upstreamModel, responsesBody); bridgeOK {
 		var bridgeReqBody map[string]any
 		if decodeErr := decodeOpenAIJSONUseNumber(responsesBody, &bridgeReqBody); decodeErr == nil && bridgeReqBody != nil {

@@ -1084,14 +1084,18 @@ export default {
         saveFailed: 'Failed to save overload cooldown settings'
       },
       openaiFastBridge: {
-        title: 'Fast WS Bridge',
-        description: 'Control whether HTTP/SSE Fast / Ultra Fast requests are switched to the upstream Responses WebSocket',
-        enabled: 'Enable Fast WS Bridge',
-        enabledHint: 'Only applies to priority/ultrafast requests on ChatGPT OAuth/Codex accounts; normal requests are unaffected',
-        note: 'Disabled by default. Fast can also take effect over HTTP in some environments; enable this only when HTTP Fast does not take effect or official WS parity is required.',
-        saved: 'Fast WS bridge settings saved',
-        saveFailed: 'Failed to save Fast WS bridge settings',
-        loadFailed: 'Failed to load Fast WS bridge settings'
+        title: 'HTTP→WS Bridge',
+        description: 'Control whether eligible HTTP/SSE Responses / Messages requests use the upstream Responses WebSocket',
+        enabled: 'Enable HTTP→WS Bridge',
+        enabledHint: 'The enable switch defaults off; scope defaults to all. Only ChatGPT OAuth/Codex accounts are eligible. Normal requests respect account WS opt-out; group-forced Fast keeps its existing override, while explicit force_http always wins. Disabling this switch preserves the selected scope.',
+        scope: 'Bridge scope',
+        scopeAll: 'All eligible requests (default)',
+        scopeFastOnly: 'Fast / Ultra Fast requests only',
+        scopeHint: 'The global scope covers eligible Responses / Messages requests on OAuth/Codex accounts, including standard requests; Fast-only scope is limited to priority/ultrafast. Neither scope covers Chat Completions, API Key, passthrough, or compact requests.',
+        note: 'This setting only selects the transport: it does not upgrade standard requests to Fast or change existing billing rules. Independent group Fast policies can still apply. Fast can also work over HTTP; choosing WS does not guarantee Fast takes effect.',
+        saved: 'HTTP→WS bridge settings saved',
+        saveFailed: 'Failed to save HTTP→WS bridge settings',
+        loadFailed: 'Failed to load HTTP→WS bridge settings'
       },
       rateLimit429Cooldown: {
         title: '429 Default Cooldown',

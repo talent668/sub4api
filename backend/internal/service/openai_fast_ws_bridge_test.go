@@ -43,7 +43,7 @@ func newFastWSBridgeTestService(t *testing.T, cfg *config.Config, captureConn *o
 		openaiWSPool:     pool,
 		settingService: NewSettingService(
 			&openAIFastPolicyRepoStub{values: map[string]string{
-				SettingKeyOpenAIFastBridgeSettings: `{"enabled":true}`,
+				SettingKeyOpenAIFastBridgeSettings: `{"enabled":true,"scope":"fast_only"}`,
 			}},
 			&config.Config{},
 		),
@@ -607,9 +607,9 @@ func TestOpenAIGatewayService_FastBridgeSwitchIsCached(t *testing.T) {
 	}
 	require.Equal(t, int32(1), repo.bridgeReads.Load())
 
-	require.NoError(t, svc.settingService.SetOpenAIFastBridgeSettings(ctx, &OpenAIFastBridgeSettings{Enabled: false}))
+	require.NoError(t, svc.settingService.SetOpenAIFastBridgeSettings(ctx, &OpenAIFastBridgeSettings{Enabled: false, Scope: OpenAIFastBridgeScopeAll}))
 	require.False(t, svc.openAIFastBridgeEnabled(ctx), "saving the switch must take effect immediately in-process")
-	require.NoError(t, svc.settingService.SetOpenAIFastBridgeSettings(ctx, &OpenAIFastBridgeSettings{Enabled: true}))
+	require.NoError(t, svc.settingService.SetOpenAIFastBridgeSettings(ctx, &OpenAIFastBridgeSettings{Enabled: true, Scope: OpenAIFastBridgeScopeAll}))
 	require.True(t, svc.openAIFastBridgeEnabled(ctx))
 	require.Equal(t, int32(1), repo.bridgeReads.Load())
 }

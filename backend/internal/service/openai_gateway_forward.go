@@ -115,8 +115,8 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	wsDecision := s.getOpenAIWSProtocolResolver().Resolve(account)
 	fastWSBridge := false
 	if bridged, bridgedOK := s.resolveOpenAIFastWSBridgeDecision(ctx, c, account, body, wsDecision); bridgedOK {
-		// Fast/Ultra Fast 只能经上游 Responses WS 被 ChatGPT Codex 后端调度；
-		// HTTP 入站的 fast 请求改走 WS 上游，否则 priority 会被静默降级。
+		// The web-controlled bridge can include Standard or only Fast tiers.
+		// Keep its retry, timeout and safe HTTP fallback semantics for both.
 		wsDecision = bridged
 		fastWSBridge = true
 	} else {
