@@ -1844,6 +1844,9 @@ export interface UsageLog {
   // User-Agent
   user_agent: string | null
   ip_address?: string | null
+  session_id?: string | null
+  session_average_output_tps?: number | null
+  session_tps_request_count?: number
 
   // Cache TTL Override
   cache_ttl_overridden: boolean

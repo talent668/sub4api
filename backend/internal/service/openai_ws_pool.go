@@ -825,15 +825,15 @@ func (ap *openAIWSAccountPool) signalChangedLocked() {
 }
 
 type OpenAIWSPoolMetricsSnapshot struct {
-	AcquireTotal            int64
-	AcquireReuseTotal       int64
-	AcquireCreateTotal      int64
-	AcquireQueueWaitTotal   int64
-	AcquireQueueWaitMsTotal int64
-	ConnPickTotal           int64
-	ConnPickMsTotal         int64
-	ScaleUpTotal            int64
-	ScaleDownTotal          int64
+	AcquireTotal            int64 `json:"acquire_total"`
+	AcquireReuseTotal       int64 `json:"acquire_reuse_total"`
+	AcquireCreateTotal      int64 `json:"acquire_create_total"`
+	AcquireQueueWaitTotal   int64 `json:"acquire_queue_wait_total"`
+	AcquireQueueWaitMsTotal int64 `json:"acquire_queue_wait_ms_total"`
+	ConnPickTotal           int64 `json:"conn_pick_total"`
+	ConnPickMsTotal         int64 `json:"conn_pick_ms_total"`
+	ScaleUpTotal            int64 `json:"scale_up_total"`
+	ScaleDownTotal          int64 `json:"scale_down_total"`
 }
 
 type openAIWSPoolMetrics struct {

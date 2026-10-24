@@ -324,6 +324,18 @@ func (h *AccountHandler) GetCodexTicketCadence(c *gin.Context) {
 	response.Success(c, h.codexTicketGateway.CodexTicketCadence(c.Request.Context()))
 }
 
+// GetCodexWSPoolMetrics 暴露 Responses WebSocket 连接池与传输层指标。
+// 关键观测点：连接复用率 = pool.acquire_reuse_total / pool.acquire_total，
+// 复用率低说明请求在为现场拨号付费（首字慢的直接原因）；transport 段给出
+// 代理客户端缓存命中与连接复用比。指标为进程生命周期累计值。
+func (h *AccountHandler) GetCodexWSPoolMetrics(c *gin.Context) {
+	if h.codexTicketGateway == nil {
+		codexTicketError(c, service.ErrCodexTicketUnavailable)
+		return
+	}
+	response.Success(c, h.codexTicketGateway.SnapshotOpenAIWSPerformanceMetrics())
+}
+
 func (h *AccountHandler) UpdateCodexTicketCadence(c *gin.Context) {
 	if h.codexTicketSettings == nil {
 		codexTicketError(c, service.ErrCodexTicketUnavailable)

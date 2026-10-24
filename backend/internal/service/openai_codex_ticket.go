@@ -281,6 +281,9 @@ func (s *OpenAIGatewayService) applyOpenAICodexTicketWithGeneration(ctx context.
 	}
 	var ticket *openAICodexTicket
 	if s.openaiCodexTicketLifecycle != nil {
+		// The database owns the current generation. Never publish request-side
+		// reads into a cache: a concurrent invalidation or harvest can make them
+		// stale before this call returns, regardless of their capture timestamp.
 		raw, err := s.openaiCodexTicketLifecycle.CurrentTicket(ctx, account.ID, model)
 		if err != nil {
 			return nil, err

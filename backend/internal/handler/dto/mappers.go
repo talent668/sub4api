@@ -744,6 +744,8 @@ func usageLogFromServiceUser(l *service.UsageLog) UsageLog {
 		UserAgent:                 l.UserAgent,
 		IPAddress:                 l.IPAddress,
 		SessionID:                 l.SessionID,
+		SessionAverageOutputTPS:   l.SessionAverageOutputTPS,
+		SessionTPSRequestCount:    l.SessionTPSRequestCount,
 		CacheTTLOverridden:        l.CacheTTLOverridden,
 		BillingMode:               l.BillingMode,
 		CreatedAt:                 l.CreatedAt,

@@ -70,8 +70,10 @@ const (
 	// defaultMaxUpstreamClients: 默认最大客户端缓存数量
 	// 超出后会淘汰最久未使用的客户端
 	defaultMaxUpstreamClients = 5000
-	// defaultClientIdleTTLSeconds: 默认客户端空闲回收阈值（15分钟）
-	defaultClientIdleTTLSeconds = 900
+	// defaultClientIdleTTLSeconds: 默认客户端空闲回收阈值（1小时）。
+	// 调长以减少高峰后整池冷启动（DNS+TCP+TLS，代理链路下尤其贵）；
+	// 仍可通过 gateway.client_idle_ttl_seconds 覆盖。
+	defaultClientIdleTTLSeconds = 3600
 	// OpenAI HTTP/2 代理回退策略默认值
 	defaultOpenAIHTTP2FallbackErrorThreshold = 2
 	defaultOpenAIHTTP2FallbackWindow         = 60 * time.Second

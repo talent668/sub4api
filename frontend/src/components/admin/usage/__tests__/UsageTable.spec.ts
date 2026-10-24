@@ -34,6 +34,8 @@ const localizedMessages: Record<'en' | 'zh', Record<string, string>> = {
 
 const messages: Record<string, string> = {
   'usage.outputTps': 'Output TPS',
+  'usage.sessionOutputTps': 'Session avg TPS',
+  'usage.cacheRatio': 'Cache ratio',
   'admin.usage.userDeletedBadge': 'Deleted',
   'usage.costDetails': 'Cost Breakdown',
   'admin.usage.inputCost': 'Input Cost',
@@ -157,6 +159,28 @@ describe('admin UsageTable tooltip', () => {
     })
     expect(wrapper.findAll('[data-testid="output-tps"]').map(cell => cell.text())).toEqual(['50.0 tok/s', '—', '—'])
     expect(wrapper.text()).toContain('Output TPS')
+  })
+
+  it('shows per-request TPS, session average and cache ratio together', () => {
+    const row = {
+      ...baseImageRow, image_count: 0, billing_mode: 'token',
+      output_tokens: 1000, duration_ms: 20_000,
+      input_tokens: 100, cache_creation_tokens: 200, cache_read_tokens: 9700,
+      session_id: 'conversation-1', session_average_output_tps: 62.5, session_tps_request_count: 4,
+    }
+    const wrapper = mount(UsageTable, {
+      props: {
+        data: [row, { ...row, request_id: 'no-session', session_id: undefined, session_average_output_tps: null, session_tps_request_count: 0 }],
+        loading: false,
+        columns: [{ key: 'latency', label: 'Latency' }],
+      },
+      global: { stubs: { DataTable: DataTableStub, EmptyState: true, Icon: true, Teleport: true } },
+    })
+    expect(wrapper.findAll('[data-testid="output-tps"]').map(cell => cell.text())).toEqual(['50.0 tok/s', '50.0 tok/s'])
+    expect(wrapper.findAll('[data-testid="session-output-tps"]').map(cell => cell.text())).toEqual(['62.5 tok/s', '—'])
+    expect(wrapper.findAll('[data-testid="cache-ratio"]').map(cell => cell.text())).toEqual(['97.0%', '97.0%'])
+    expect(wrapper.text()).toContain('Session avg TPS')
+    expect(wrapper.text()).toContain('Cache ratio')
   })
 
   beforeEach(() => {

@@ -629,11 +629,30 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			if imageOutput, ok := extractImageGenerationOutputFromSSEData(dataBytes, streamSeenImages); ok {
 				streamImageOutputs = append(streamImageOutputs, imageOutput)
 			}
-			streamDoneItems.Observe(dataBytes)
-			if responsesStreamEventMayContributeToOutput(eventType) {
-				var streamEvent apicompat.ResponsesStreamEvent
-				if err := json.Unmarshal(dataBytes, &streamEvent); err == nil {
-					streamOutputAccumulator.ProcessEvent(&streamEvent)
+			// 只有 output_item.done 会被记录；按已知 eventType 门控，跳过对每个
+			// delta 行的全量 JSON 校验（Observe 内部仍会自查 type，语义不变）。
+			if eventType == "response.output_item.done" {
+				streamDoneItems.Observe(dataBytes)
+			}
+			switch eventType {
+			case "response.output_text.delta", "response.reasoning_summary_text.delta":
+				// 热路径：这两类 delta 的累加只需要 delta 字段，单键提取替代整事件
+				// 反序列化；与 ProcessEvent 对应分支语义一致（空串/非字符串不写入）。
+				if delta := gjson.GetBytes(dataBytes, "delta"); delta.Type == gjson.String {
+					if deltaStr := delta.String(); deltaStr != "" {
+						if eventType == "response.output_text.delta" {
+							streamOutputAccumulator.ProcessTextDelta(deltaStr)
+						} else {
+							streamOutputAccumulator.ProcessReasoningDelta(deltaStr)
+						}
+					}
+				}
+			default:
+				if responsesStreamEventMayContributeToOutput(eventType) {
+					var streamEvent apicompat.ResponsesStreamEvent
+					if err := json.Unmarshal(dataBytes, &streamEvent); err == nil {
+						streamOutputAccumulator.ProcessEvent(&streamEvent)
+					}
 				}
 			}
 			if normalizedData, normalized := normalizeResponsesStreamingTerminalOutput(dataBytes, streamOutputAccumulator, streamDoneItems, streamImageOutputs); normalized {

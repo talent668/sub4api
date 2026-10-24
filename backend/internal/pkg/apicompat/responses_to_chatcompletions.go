@@ -571,6 +571,26 @@ func (a *BufferedResponseAccumulator) ProcessEvent(event *ResponsesStreamEvent) 
 	}
 }
 
+// ProcessTextDelta accumulates a response.output_text.delta fragment without
+// decoding the full stream event. Hot-path equivalent of the corresponding
+// ProcessEvent branch: empty fragments are ignored.
+func (a *BufferedResponseAccumulator) ProcessTextDelta(delta string) {
+	if a == nil || delta == "" {
+		return
+	}
+	_, _ = a.text.WriteString(delta)
+}
+
+// ProcessReasoningDelta accumulates a response.reasoning_summary_text.delta
+// fragment without decoding the full stream event. Hot-path equivalent of the
+// corresponding ProcessEvent branch.
+func (a *BufferedResponseAccumulator) ProcessReasoningDelta(delta string) {
+	if a == nil || delta == "" {
+		return
+	}
+	_, _ = a.reasoning.WriteString(delta)
+}
+
 // HasContent reports whether any content has been accumulated.
 func (a *BufferedResponseAccumulator) HasContent() bool {
 	return a.text.Len() > 0 || a.refusal.Len() > 0 || len(a.funcCalls) > 0 || a.reasoning.Len() > 0

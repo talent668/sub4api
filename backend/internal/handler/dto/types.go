@@ -669,7 +669,9 @@ type UsageLog struct {
 	IPAddress *string `json:"ip_address,omitempty"`
 	// SessionID is the explicit client-provided request correlation identifier
 	// (e.g. the session_id / X-Session-Id headers). Omitted when absent.
-	SessionID *string `json:"session_id,omitempty"`
+	SessionID               *string  `json:"session_id,omitempty"`
+	SessionAverageOutputTPS *float64 `json:"session_average_output_tps"`
+	SessionTPSRequestCount  int64    `json:"session_tps_request_count"`
 
 	// Cache TTL Override 标记
 	CacheTTLOverridden bool `json:"cache_ttl_overridden"`

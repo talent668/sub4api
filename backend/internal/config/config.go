@@ -2576,7 +2576,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.max_conns_per_host", 1024)      // 每主机最大连接数（含活跃；流式/HTTP1.1 场景可调大，如 2400+）
 	viper.SetDefault("gateway.idle_conn_timeout_seconds", 90) // 空闲连接超时（秒）
 	viper.SetDefault("gateway.max_upstream_clients", 5000)
-	viper.SetDefault("gateway.client_idle_ttl_seconds", 900)
+	viper.SetDefault("gateway.client_idle_ttl_seconds", 3600)    // 上游客户端缓存 TTL（秒），与 repository.http_upstream 默认一致
 	viper.SetDefault("gateway.concurrency_slot_ttl_minutes", 30) // 并发槽位过期时间（支持超长请求）
 	viper.SetDefault("gateway.stream_data_interval_timeout", 180)
 	viper.SetDefault("gateway.stream_keepalive_interval", 10)

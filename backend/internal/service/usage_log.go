@@ -190,6 +190,9 @@ type UsageLog struct {
 	// (e.g. the session_id / X-Session-Id headers). Nil when the client sent no
 	// valid session header. It is never derived from prompt_cache_key or content.
 	SessionID *string
+	// Derived from all retained valid text requests in this user's session.
+	SessionAverageOutputTPS *float64
+	SessionTPSRequestCount  int64
 	// UpstreamRequestID 是直接上游在响应头中声明的请求标识，只读账户
 	// extra.upstream_request_id_header 指定的头；账户未指定头名、WS 轮次
 	// 与上游没有该头的路径为 nil。

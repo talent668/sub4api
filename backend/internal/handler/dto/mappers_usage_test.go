@@ -8,6 +8,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestUsageLogFromService_PreservesSessionTPSForUserAndAdmin(t *testing.T) {
+	sessionID := "conversation-1"
+	rate := 62.5
+	log := &service.UsageLog{SessionID: &sessionID, SessionAverageOutputTPS: &rate, SessionTPSRequestCount: 4}
+	for _, value := range []UsageLog{*UsageLogFromService(log), UsageLogFromServiceAdmin(log).UsageLog} {
+		require.Equal(t, &rate, value.SessionAverageOutputTPS)
+		require.Equal(t, int64(4), value.SessionTPSRequestCount)
+		payload, err := json.Marshal(value)
+		require.NoError(t, err)
+		require.Contains(t, string(payload), `"session_average_output_tps":62.5`)
+	}
+	missing := UsageLogFromService(&service.UsageLog{})
+	require.Nil(t, missing.SessionAverageOutputTPS)
+	require.Zero(t, missing.SessionTPSRequestCount)
+}
+
 func TestUsageLogFromService_IncludesOpenAIWSMode(t *testing.T) {
 	t.Parallel()
 

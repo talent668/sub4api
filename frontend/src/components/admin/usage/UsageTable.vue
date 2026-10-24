@@ -250,6 +250,10 @@
               <span class="font-medium tabular-nums" :class="LATENCY_TEXT_CLASSES[durationSeverity(row.duration_ms ?? 0)]">{{ formatDuration(row.duration_ms) }}</span>
               <span class="text-gray-400 dark:text-gray-500" :title="t('usage.outputTpsHint')">{{ t('usage.outputTps') }}</span>
               <span data-testid="output-tps" class="font-medium tabular-nums text-gray-700 dark:text-gray-300">{{ formatUsageOutputRate(row) }}</span>
+              <span class="text-gray-400 dark:text-gray-500" :title="t('usage.sessionOutputTpsHint', { count: row.session_tps_request_count || 0 })">{{ t('usage.sessionOutputTps') }}</span>
+              <span data-testid="session-output-tps" class="font-medium tabular-nums text-gray-700 dark:text-gray-300">{{ formatUsageSessionOutputRate(row) }}</span>
+              <span class="text-gray-400 dark:text-gray-500" :title="t('usage.cacheRatioHint')">{{ t('usage.cacheRatio') }}</span>
+              <span data-testid="cache-ratio" class="font-medium tabular-nums text-gray-700 dark:text-gray-300">{{ formatUsageCacheRate(row) }}</span>
             </div>
           </div>
         </template>
@@ -571,6 +575,8 @@ import {
   durationSeverity,
   firstTokenSeverity,
   formatUsageOutputRate,
+  formatUsageSessionOutputRate,
+  formatUsageCacheRate,
 } from '@/utils/latencyHealth'
 import {
   BILLING_MODE_TOKEN,

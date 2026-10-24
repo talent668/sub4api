@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { durationSeverity, firstTokenSeverity, formatUsageOutputRate } from '../latencyHealth'
+import { durationSeverity, firstTokenSeverity, formatUsageOutputRate, formatUsageSessionOutputRate, formatUsageCacheRate } from '../latencyHealth'
 
 describe('latencyHealth', () => {
   it('classifies first-token latency at 10s/30s/60s boundaries', () => {
@@ -59,5 +59,44 @@ describe('formatUsageOutputRate', () => {
     { request_type: 'unknown' as const },
   ])('omits non-text or unknown request rates: %j', (fields) => {
     expect(formatUsageOutputRate({ ...row, ...fields })).toBe('—')
+  })
+})
+
+describe('formatUsageSessionOutputRate', () => {
+  const row = { session_id: 'conversation-1', session_average_output_tps: 47.36, session_tps_request_count: 3 }
+
+  it('shows the backend session rate without recomputing from the current page', () => {
+    expect(formatUsageSessionOutputRate(row)).toBe('47.4 tok/s')
+  })
+
+  it.each([
+    { session_id: undefined }, { session_id: ' ' },
+    { session_tps_request_count: 0 }, { session_tps_request_count: undefined },
+    { session_average_output_tps: null }, { session_average_output_tps: undefined },
+    { session_average_output_tps: NaN }, { session_average_output_tps: Infinity },
+    { session_average_output_tps: 0 }, { session_average_output_tps: -1 },
+  ])('keeps unavailable session rates distinct from zero: %j', (fields) => {
+    expect(formatUsageSessionOutputRate({ ...row, ...fields })).toBe('—')
+  })
+})
+
+describe('formatUsageCacheRate', () => {
+  const row = { input_tokens: 100, cache_creation_tokens: 200, cache_read_tokens: 9700, image_count: 0, image_output_tokens: 0, billing_mode: 'token' }
+
+  it('includes cache creation in input and excludes output from the denominator', () => {
+    expect(formatUsageCacheRate(row)).toBe('97.0%')
+  })
+
+  it('shows uncached and fully cached input as 0% and 100%', () => {
+    expect(formatUsageCacheRate({ ...row, cache_read_tokens: 0 })).toBe('0.0%')
+    expect(formatUsageCacheRate({ ...row, input_tokens: 0, cache_creation_tokens: 0 })).toBe('100.0%')
+    expect(formatUsageCacheRate({ ...row, input_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0 })).toBe('—')
+  })
+
+  it.each([
+    { input_tokens: -1 }, { input_tokens: NaN }, { cache_creation_tokens: -1 },
+    { cache_read_tokens: Infinity }, { image_count: 1 }, { image_output_tokens: 100 }, { billing_mode: 'image' },
+  ])('omits invalid or inapplicable ratios: %j', (fields) => {
+    expect(formatUsageCacheRate({ ...row, ...fields })).toBe('—')
   })
 })

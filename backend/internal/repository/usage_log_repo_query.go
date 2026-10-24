@@ -158,6 +158,9 @@ func (r *usageLogRepository) ListWithFilters(ctx context.Context, params paginat
 	if err := r.hydrateUsageLogAssociations(ctx, logs); err != nil {
 		return nil, nil, err
 	}
+	if err := r.hydrateUsageLogSessionStatsBestEffort(ctx, logs); err != nil {
+		return nil, nil, err
+	}
 	return logs, page, nil
 }
 
