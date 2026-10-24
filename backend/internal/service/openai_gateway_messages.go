@@ -26,7 +26,7 @@ import (
 // to OpenAI Responses API format, forwards to the OpenAI upstream, and converts
 // the response back to Anthropic Messages format. This enables Claude Code
 // clients to access OpenAI models through the standard /v1/messages endpoint.
-func (s *OpenAIGatewayService) ForwardAsAnthropic(
+func (s *OpenAIGatewayService) forwardAsAnthropicWithTransportObservation(
 	ctx context.Context,
 	c *gin.Context,
 	account *Account,
@@ -34,6 +34,14 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	promptCacheKey string,
 	defaultMappedModel string,
 ) (*OpenAIForwardResult, error) {
+	if account.IsKimiOAuth() {
+		fresh, err := s.prepareKimiOAuthAccount(ctx, c, account)
+		if err != nil {
+			return nil, err
+		}
+		account = fresh
+		ctx = context.WithValue(ctx, kimiPreparedAccountContextKey{}, account)
+	}
 	// 工具 Schema 清洗必须先于所有分流：下游每条路径（原生 Anthropic 直通、
 	// Chat Completions 转换、Responses 转换）都会把 tools 原样带给上游，而
 	// xAI / Moonshot 等严格校验方会因 input_schema 里的 required:null 或

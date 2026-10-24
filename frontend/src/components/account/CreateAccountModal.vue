@@ -606,8 +606,16 @@
         </div>
       </div>
 
+      <div v-if="form.platform === 'kimi'">
+        <label class="input-label">{{ t('admin.accounts.accountType') }}</label>
+        <div class="mt-2 flex gap-4">
+          <label class="flex items-center gap-2"><input v-model="accountCategory" type="radio" value="apikey" class="text-primary-600" />API Key</label>
+          <label class="flex items-center gap-2"><input v-model="accountCategory" type="radio" value="oauth-based" class="text-primary-600" />{{ t('admin.accounts.kimiOAuth.title') }}</label>
+        </div>
+      </div>
+
       <!-- Account Mode Selection (Kimi / Zhipu / DeepSeek) -->
-      <div v-if="isCNPlatform && !isOpenCodeGoPlatform">
+      <div v-if="isCNPlatform && !isOpenCodeGoPlatform && !isKimiOAuth">
         <label class="input-label">{{ t('admin.accounts.cnProviders.accountMode.title') }}</label>
         <div class="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2" data-tour="account-form-mode">
           <!-- Pay-as-you-go (token balance) -->
@@ -667,7 +675,7 @@
       </div>
 
       <!-- API Protocol Selection (Kimi / Zhipu / DeepSeek / OpenCode) -->
-      <div v-if="isMultiProtocolPlatform" class="mt-4">
+      <div v-if="isMultiProtocolPlatform && !isKimiOAuth" class="mt-4">
         <label class="input-label">{{ t('admin.accounts.cnProviders.apiProtocol.title') }}</label>
         <div class="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-3">
           <button
@@ -3375,11 +3383,23 @@
             </p>
           </div>
           <div class="w-52">
-            <Select v-model="openaiResponsesWebSocketV2Mode" :options="openAIWSModeOptions" />
+            <Select v-model="openaiResponsesWebSocketV2Mode" :options="availableOpenAIWSModeOptions" />
           </div>
         </div>
       </div>
 
+      <div v-if="form.platform === 'openai' && (accountCategory === 'oauth-based' || accountCategory === 'apikey')" class="space-y-1">
+        <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200">
+          <input v-model="openaiNativeWSPreferred" type="checkbox" data-testid="create-native-ws-preferred" class="text-primary-600" @change="applyNativeWSPreferredPreset" />
+          {{ t('admin.accounts.openai.nativeWSPreferred') }}
+        </label>
+        <p v-if="openaiNativeWSPreferred" class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.openai.nativeWSPreferredHint') }}</p>
+        <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200">
+          <input v-model="openaiNativeWSOnly" type="checkbox" data-testid="create-native-ws-only" class="text-primary-600" @change="applyNativeWSPreset" />
+          {{ t('admin.accounts.openai.nativeWSOnly') }}
+        </label>
+        <p v-if="openaiNativeWSOnly" class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.openai.nativeWSOnlyHint') }}</p>
+      </div>
       <!-- Anthropic API Key 自动透传开关 -->
       <div
         v-if="form.platform === 'anthropic' && accountCategory === 'apikey'"
@@ -3783,7 +3803,9 @@
 
     <!-- Step 2: OAuth Authorization -->
     <div v-else class="space-y-5">
+      <KimiDeviceAuthorization v-if="isKimiOAuth && show" :proxy-id="form.proxy_id" :busy="submitting" @authorized="handleKimiAuthorized" />
       <OAuthAuthorizationFlow
+        v-else
         ref="oauthFlowRef"
         :add-method="form.platform === 'anthropic' ? addMethod : 'oauth'"
         :auth-url="currentAuthUrl"
@@ -4175,6 +4197,7 @@ import { useOpenAIOAuth } from '@/composables/useOpenAIOAuth'
 import { useGeminiOAuth } from '@/composables/useGeminiOAuth'
 import { useAntigravityOAuth } from '@/composables/useAntigravityOAuth'
 import { useGrokOAuth } from '@/composables/useGrokOAuth'
+import KimiDeviceAuthorization from '@/components/account/KimiDeviceAuthorization.vue'
 import type {
   Proxy,
   AdminGroup,
@@ -4278,6 +4301,7 @@ const { t } = useI18n()
 const browserTimeZone = getBrowserTimeZone()
 
 const oauthStepTitle = computed(() => {
+  if (form.platform === 'kimi') return t('admin.accounts.kimiOAuth.title')
   if (form.platform === 'openai') return t('admin.accounts.oauth.openai.title')
   if (form.platform === 'gemini') return t('admin.accounts.oauth.gemini.title')
   if (form.platform === 'antigravity') return t('admin.accounts.oauth.antigravity.title')
@@ -4460,6 +4484,7 @@ const adaptiveBaseUrls = ref<Record<CnNativeApiProtocol, string>>({
 const isCNPlatform = computed(() => isCNProviderPlatform(form.platform))
 const isOpenCodeGoPlatform = computed(() => form.platform === 'opencode_go')
 const isMultiProtocolPlatform = computed(() => isMultiProtocolApiKeyPlatform(form.platform))
+const isKimiOAuth = computed(() => form.platform === 'kimi' && accountCategory.value === 'oauth-based')
 // 前端没有专属界面、走通用表单的多协议供应商：模式、协议、默认端点
 // 与分流规则全部来自平台清单中的 profile。
 const isGenericMultiProtocolPlatform = computed(
@@ -4754,6 +4779,8 @@ const openAIResponsesMode = ref<OpenAIResponsesMode>('auto')
 const openAIImagesUrlToB64JsonEnabled = ref(false)
 const openAIEndpointCapabilities = ref<OpenAIEndpointCapability[]>(['chat_completions', 'embeddings'])
 const openaiOAuthResponsesWebSocketV2Mode = ref<OpenAIWSMode>(OPENAI_WS_MODE_OFF)
+const openaiNativeWSOnly = ref(false)
+const openaiNativeWSPreferred = ref(false)
 const openaiAPIKeyResponsesWebSocketV2Mode = ref<OpenAIWSMode>(OPENAI_WS_MODE_OFF)
 type CodexTicketAccountPolicy = 'inherit' | 'allow' | 'deny'
 const codexTicketAccountPolicy = ref<CodexTicketAccountPolicy>('inherit')
@@ -4986,9 +5013,28 @@ const openaiResponsesWebSocketV2Mode = computed({
   }
 })
 
+const availableOpenAIWSModeOptions = computed(() => {
+  if (openaiNativeWSPreferred.value) return openAIWSModeOptions.value.filter(option => option.value === OPENAI_WS_MODE_CTX_POOL)
+  if (openaiNativeWSOnly.value) return openAIWSModeOptions.value.filter(option => option.value === OPENAI_WS_MODE_CTX_POOL || option.value === OPENAI_WS_MODE_PASSTHROUGH)
+  return openAIWSModeOptions.value
+})
+
 const openAIWSModeHintKey = computed(() =>
   resolveOpenAIWSModeHintKey(openaiResponsesWebSocketV2Mode.value)
 )
+
+const applyNativeWSPreset = () => {
+  if (openaiNativeWSOnly.value) openaiNativeWSPreferred.value = false
+  if (openaiNativeWSOnly.value) openaiResponsesWebSocketV2Mode.value = OPENAI_WS_MODE_CTX_POOL
+  if (openaiNativeWSOnly.value && accountCategory.value === 'apikey' && !openAIEndpointCapabilities.value.includes('chat_completions')) openAIEndpointCapabilities.value.push('chat_completions')
+}
+
+const applyNativeWSPreferredPreset = () => {
+  if (!openaiNativeWSPreferred.value) return
+  openaiNativeWSOnly.value = false
+  openaiResponsesWebSocketV2Mode.value = OPENAI_WS_MODE_CTX_POOL
+  if (accountCategory.value === 'apikey' && !openAIEndpointCapabilities.value.includes('chat_completions')) openAIEndpointCapabilities.value.push('chat_completions')
+}
 
 const isOpenAIModelRestrictionDisabled = computed(() =>
   form.platform === 'openai' && openaiPassthroughEnabled.value
@@ -5100,6 +5146,7 @@ const isOAuthFlow = computed(() => {
 const isGrokSSOInputMethod = computed(() => form.platform === 'grok' && oauthFlowRef.value?.inputMethod === 'sso_cookie')
 
 const isManualInputMethod = computed(() => {
+  if (isKimiOAuth.value) return false
   return oauthFlowRef.value?.inputMethod === 'manual'
 })
 
@@ -5160,6 +5207,11 @@ watch(
 watch(
   [accountCategory, addMethod, antigravityAccountType, () => form.platform],
   ([category, method, agType]) => {
+    if (form.platform !== 'openai') {
+      openaiNativeWSOnly.value = false
+      openaiNativeWSPreferred.value = false
+    } else if (openaiNativeWSPreferred.value) applyNativeWSPreferredPreset()
+    else applyNativeWSPreset()
     // Antigravity upstream 类型（实际创建为 apikey）
     if (form.platform === 'antigravity' && agType === 'upstream') {
       form.type = 'apikey'
@@ -5732,6 +5784,8 @@ const resetForm = () => {
   openAIResponsesMode.value = 'auto'
   openAIEndpointCapabilities.value = ['chat_completions', 'embeddings']
   openaiOAuthResponsesWebSocketV2Mode.value = OPENAI_WS_MODE_OFF
+  openaiNativeWSOnly.value = false
+  openaiNativeWSPreferred.value = false
   openaiAPIKeyResponsesWebSocketV2Mode.value = OPENAI_WS_MODE_OFF
   codexCLIOnlyEnabled.value = false
   codexCLIOnlyAppServerEnabled.value = false
@@ -5801,6 +5855,10 @@ const buildOpenAIExtra = (base?: Record<string, unknown>): Record<string, unknow
   }
 
   const extra: Record<string, unknown> = { ...(base || {}) }
+  if (openaiNativeWSOnly.value) extra.openai_native_ws_only = true
+  else delete extra.openai_native_ws_only
+  if (openaiNativeWSPreferred.value) extra.openai_native_ws_preferred = true
+  else delete extra.openai_native_ws_preferred
   extra.openai_request_timezone = openAIRequestTimezone.value
   if (accountCategory.value === 'oauth-based') {
     extra.openai_oauth_responses_websockets_v2_mode = openaiOAuthResponsesWebSocketV2Mode.value
@@ -6446,6 +6504,11 @@ const createAccountAndFinish = async (
     upstream_billing_probe_enabled: type === 'apikey' ? upstreamBillingAutoProbeEnabled.value : undefined,
     auto_pause_on_expired: autoPauseOnExpired.value
   })
+}
+
+const handleKimiAuthorized = async (credentials: Record<string, unknown>) => {
+  if (submitting.value) return
+  await createAccountAndFinish('kimi', 'oauth', credentials)
 }
 
 // Grok 手动 RT 批量验证和创建

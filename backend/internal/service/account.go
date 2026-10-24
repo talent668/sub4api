@@ -1514,6 +1514,9 @@ func (a *Account) IsOpenAIApiKey() bool {
 // 适用 openai、国产 OpenAI 兼容供应商（kimi/zhipu/deepseek）与 OpenCode Go；
 // grok 走 GetGrokBaseURL，此处对 grok 返回 "" 以保持原有行为。
 func (a *Account) GetOpenAIBaseURL() string {
+	if a.IsKimiOAuth() {
+		return DefaultKimiCodingBaseURL
+	}
 	if !a.IsOpenAI() && !a.IsMultiProtocolAPIKey() {
 		return ""
 	}
@@ -1539,6 +1542,9 @@ func (a *Account) GetOpenAIBaseURL() string {
 // GetAccountMode 返回国产供应商账号的接入模式（payg / coding）；非国产供应商或未设置时
 // 返回空串。存储于 credentials["account_mode"]。
 func (a *Account) GetAccountMode() string {
+	if a.IsKimiOAuth() {
+		return AccountModeCoding
+	}
 	if a == nil {
 		return ""
 	}
@@ -1559,6 +1565,9 @@ func (a *Account) IsCodingPlan() bool {
 // （与既有行为完全一致）。responses 协议仅 deepseek / kimi / minimax 支持（官方原生
 // Responses 端点，适配 Codex）；zhipu 无此端点。
 func (a *Account) GetAPIProtocol() string {
+	if a.IsKimiOAuth() {
+		return APIProtocolAdaptive
+	}
 	if a == nil || !a.IsMultiProtocolAPIKey() {
 		return APIProtocolChatCompletions
 	}
@@ -1611,6 +1620,12 @@ func (a *Account) IsAdaptiveAPIProtocol() bool {
 // adaptive 账号优先使用 api_base_urls 中的分协议地址，缺失时按平台和
 // account_mode 使用官方默认端点。base_url 继续作为 Chat Completions 地址兼容旧字段。
 func (a *Account) GetCNProtocolBaseURL(protocol string) string {
+	if a.IsKimiOAuth() {
+		if protocol == APIProtocolAnthropic {
+			return DefaultKimiCodingAnthropicBaseURL
+		}
+		return DefaultKimiCodingBaseURL
+	}
 	if a == nil || !a.IsMultiProtocolAPIKey() {
 		return ""
 	}
@@ -1668,9 +1683,12 @@ func (a *Account) GetOpenAIFormatBaseURL() string {
 	return a.GetOpenAIBaseURL()
 }
 
-// GetCNAPIKey 返回国产 OpenAI 兼容供应商账号的 api_key 凭据（kimi/zhipu/deepseek）。
+// GetCNAPIKey 返回国产供应商的 API Key，或 Kimi OAuth 的 Bearer Token。
 // 与 openai 的 GetOpenAIApiKey 区分：后者仅对 openai 平台返回。
 func (a *Account) GetCNAPIKey() string {
+	if a.IsKimiOAuth() {
+		return a.GetCredential("access_token")
+	}
 	if a == nil || !a.IsMultiProtocolAPIKey() {
 		return ""
 	}
@@ -1847,11 +1865,15 @@ func (a *Account) GetOpenAIApiKey() string {
 }
 
 // GetOpenAIProtocolAPIKey 返回 OpenAI 协议族 APIKey 账号的密钥。
+// Kimi Code OAuth 复用这些官方协议端点，返回其 access_token。
 // 覆盖 openai 原生账号、国产 OpenAI 兼容供应商（kimi/zhipu/deepseek）
 // 以及 OpenCode Go 账号，供转发鉴权、模型列表同步等协议族共用路径使用。
 // 注意 IsOpenAIApiKey 语义上仅指 openai 平台账号，调度倍率/WS 能力门控
 // 继续以其为准，不受本方法影响。
 func (a *Account) GetOpenAIProtocolAPIKey() string {
+	if a.IsKimiOAuth() {
+		return a.GetCredential("access_token")
+	}
 	if a == nil {
 		return ""
 	}

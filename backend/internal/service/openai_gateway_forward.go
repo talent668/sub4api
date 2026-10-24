@@ -18,7 +18,15 @@ import (
 )
 
 // Forward forwards request to OpenAI API
-func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (*OpenAIForwardResult, error) {
+func (s *OpenAIGatewayService) forwardWithTransportObservation(ctx context.Context, c *gin.Context, account *Account, body []byte) (*OpenAIForwardResult, error) {
+	if account.IsKimiOAuth() {
+		fresh, err := s.prepareKimiOAuthAccount(ctx, c, account)
+		if err != nil {
+			return nil, err
+		}
+		account = fresh
+		ctx = context.WithValue(ctx, kimiPreparedAccountContextKey{}, account)
+	}
 	if account.IsOpenAIBPS() {
 		return s.forwardOpenAIBPS(ctx, c, account, body)
 	}
@@ -1057,6 +1065,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			return wsResult, nil
 		}
 		if fastWSBridge && c != nil && c.Writer != nil && !c.Writer.Written() {
+			observeUsageTransportFallback(ctx, "ws_failure")
 			// Fast 桥接只是尽力而为：上游 WS 在写任何下游字节前失败时回退 HTTP，
 			// 保证请求仍然完成（代价是本次按 standard 调度）。
 			reason, _ := classifyOpenAIWSReconnectReason(wsErr)
@@ -1450,6 +1459,9 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 	case AccountTypeOAuth:
 		// OAuth accounts use ChatGPT internal API
 		targetURL = chatgptCodexURL
+		if account.IsKimiOAuth() {
+			targetURL = buildOpenAIResponsesURLForPlatform(account.Platform, DefaultKimiCodingBaseURL)
+		}
 	case AccountTypeSetupToken:
 		if account.IsOpenAIOAuthLike() {
 			targetURL = chatgptCodexURL

@@ -45,6 +45,24 @@ describe('CNProviderQuotaCell', () => {
     queryQuota.mockReset()
   })
 
+  it('shows Coding quota and refreshes it for Kimi OAuth accounts', async () => {
+    queryQuota.mockResolvedValue({ success: true, tiers: [{ window: '5h', used_percent: 12 }] })
+    const kimiAccount = {
+      ...account,
+      id: 8,
+      platform: 'kimi',
+      type: 'oauth',
+      credentials: { account_mode: 'coding', api_protocol: 'adaptive' },
+      extra: { kimi_5h_used_percent: 12, kimi_usage_updated_at: new Date().toISOString() }
+    } as Account
+    const wrapper = mount(CNProviderQuotaCell, { props: { account: kimiAccount } })
+    expect(wrapper.find('[data-test="cn-provider-quota"]').exists()).toBe(true)
+    await wrapper.get('[data-test="cn-provider-quota-probe"]').trigger('click')
+    await flushPromises()
+    expect(queryQuota).toHaveBeenCalledWith(8)
+    wrapper.unmount()
+  })
+
   it('renders tier rows through the shared UsageProgressBar inside the account table cell', async () => {
     queryQuota.mockResolvedValue({
       success: true,

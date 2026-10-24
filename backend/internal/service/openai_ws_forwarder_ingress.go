@@ -83,6 +83,13 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	if account == nil {
 		return errors.New("account is nil")
 	}
+	ctx = withWSFallbackObservation(ctx, c)
+	if err := s.RequireOpenAINativeWSIngress(c, account); err != nil {
+		return NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, err.Error(), err)
+	}
+	if isOpenAINativeWSRequired(c, account) {
+		ctx = context.WithValue(ctx, nativeWSRequiredRequestContextKey{}, true)
+	}
 	// A handler may reuse the same gin context across account failover attempts.
 	// Never let an OAuth attempt's response aliases leak into the next account.
 	setCodexToolNameReverse(c, nil)
@@ -117,6 +124,12 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	wsDecision := s.getOpenAIWSProtocolResolver().Resolve(account)
 	forceHTTPBridge := account.Platform == PlatformGrok ||
 		(s.pluginManager != nil && s.pluginManager.ShouldRouteOpenAIOAuth(account))
+	bridgeReason := ""
+	if account.Platform == PlatformGrok {
+		bridgeReason = "provider_http_bridge"
+	} else if forceHTTPBridge {
+		bridgeReason = "plugin_http_bridge"
+	}
 	modeRouterV2Enabled := s != nil && s.cfg != nil && s.cfg.Gateway.OpenAIWS.ModeRouterV2Enabled
 	ingressMode := OpenAIWSIngressModeCtxPool
 	if modeRouterV2Enabled && !forceHTTPBridge {
@@ -130,11 +143,15 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		}
 		switch ingressMode {
 		case OpenAIWSIngressModePassthrough:
+			if cachedOpenAIWSIngressControlReader(c, clientConn) != nil {
+				return NewOpenAIWSClientCloseError(coderws.StatusTryAgainLater, "websocket transport mode changed; reconnect to continue", nil)
+			}
 			if wsDecision.Transport != OpenAIUpstreamTransportResponsesWebsocketV2 {
 				return fmt.Errorf("websocket ingress requires ws_v2 transport, got=%s", wsDecision.Transport)
 			}
 			if s.shouldBridgeOpenAIWSPassthroughFirstMessage(account, firstClientMessage) {
 				forceHTTPBridge = true
+				bridgeReason = "large_payload"
 				break
 			}
 			// 首轮准入由握手路径完成；后续 response.create 会在写入上游前
@@ -161,6 +178,9 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				nil,
 			)
 		}
+	}
+	if forceHTTPBridge && isOpenAINativeWSRequired(c, account) {
+		return NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "native websocket is required; HTTP bridge is disabled", nil)
 	}
 	if !forceHTTPBridge && wsDecision.Transport != OpenAIUpstreamTransportResponsesWebsocketV2 {
 		return fmt.Errorf("websocket ingress requires ws_v2 transport, got=%s", wsDecision.Transport)
@@ -484,22 +504,24 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		}, nil
 	}
 
-	writeClientMessage := func(message []byte) error {
+	var controlReader *openAIWSIngressControlReader
+	var controlTurn *openAIWSIngressControlTurn
+	writeClientRaw := func(message []byte) error {
 		writeCtx, cancel := newOpenAIWSDownstreamWriteContext(ctx, hooks, s.openAIWSWriteTimeout())
 		defer cancel()
 		message = restoreCodexToolNamesFromContext(c, message)
 		return clientConn.Write(writeCtx, coderws.MessageText, message)
 	}
+	writeClientMessage := func(message []byte) error {
+		if controlReader != nil && controlTurn != nil {
+			return controlReader.writeTurn(controlTurn, message, writeClientRaw)
+		}
+		return writeClientRaw(message)
+	}
 
 	readClientMessage := func() ([]byte, error) {
 		idleTimeout := s.openAIWSIngressInterTurnIdleTimeout()
-		msgType, payload, readErr := ReadOpenAIWSClientMessage(
-			ctx,
-			clientConn,
-			idleTimeout,
-			coderws.StatusNormalClosure,
-			"websocket idle timeout",
-		)
+		payload, readErr := controlReader.readNext(ctx, idleTimeout)
 		if readErr != nil {
 			var closeErr *OpenAIWSClientCloseError
 			if errors.As(readErr, &closeErr) && closeErr.StatusCode() == coderws.StatusNormalClosure {
@@ -507,13 +529,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			}
 			return nil, readErr
 		}
-		if msgType != coderws.MessageText && msgType != coderws.MessageBinary {
-			return nil, NewOpenAIWSClientCloseError(
-				coderws.StatusPolicyViolation,
-				fmt.Sprintf("unsupported websocket client message type: %s", msgType.String()),
-				nil,
-			)
-		}
+		controlTurn = controlReader.currentTurn()
 		return payload, nil
 	}
 
@@ -521,8 +537,29 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	if err != nil {
 		return err
 	}
+	readerCtx := ctx
+	if hooks != nil && hooks.ClientLifecycleContext != nil {
+		readerCtx = hooks.ClientLifecycleContext
+	}
+	readerCtx = withWSFallbackObservation(readerCtx, c)
+	controlReader = openAIWSIngressControlReaderFor(readerCtx, c, clientConn, s.openAIWSWriteTimeout(), ResolveOpenAIWSClientReadLimitBytes(s.cfg))
+	select {
+	case <-controlReader.done:
+		return NewOpenAIWSClientCloseError(coderws.StatusNormalClosure, "client websocket is closed", nil)
+	default:
+	}
+	controlTurn = controlReader.currentTurn()
+	if controlReader.cancelled(controlTurn) {
+		return NewOpenAIWSClientCloseError(coderws.StatusNormalClosure, "request cancelled; reconnect to start a new request", errOpenAIWSClientTurnCancelled)
+	}
 
 	useHTTPBridge := forceHTTPBridge || s.shouldBridgeOpenAIWSHTTP(account, firstPayload.payloadBytes, firstPayload.previousResponseID)
+	if isOpenAINativeWSRequired(c, account) {
+		useHTTPBridge = false
+	}
+	if useHTTPBridge && !forceHTTPBridge {
+		bridgeReason = "large_payload"
+	}
 	turnState := strings.TrimSpace(c.GetHeader(openAIWSTurnStateHeader))
 	stateStore := s.getOpenAIWSStateStore()
 	groupID := getOpenAIGroupIDFromContext(c)
@@ -584,7 +621,12 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		bridgeReplayInputExists := false
 		var bridgeAccountFailoverInput []json.RawMessage
 		bridgeAccountFailoverInputExists := false
+		freshBridgeTurnRequired := false
 		for turn := 1; ; turn++ {
+			if freshBridgeTurnRequired && !openAIWSFreshRequestAfterCancel(currentBridgePayload.payloadRaw) {
+				return NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "cancelled HTTP bridge turns require a fresh message-only request without previous_response_id or tool continuation", nil)
+			}
+			freshBridgeTurnRequired = false
 			if turn > 1 && hooks != nil && hooks.BeforeRequest != nil {
 				if err := hooks.BeforeRequest(turn, currentBridgePayload.rawForHash, currentBridgePayload.originalModel); err != nil {
 					return err
@@ -677,8 +719,11 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 					return fmt.Errorf("resolve Grok websocket cache identity: %w", err)
 				}
 			}
+			turnCtx, cancelTurn := context.WithCancelCause(ctx)
+			turnCtx = withOpenAIWSIngressControl(turnCtx, controlReader, controlTurn)
+			controlReader.install(controlTurn, nil, cancelTurn)
 			result, bridgeErr := s.proxyOpenAIWSHTTPBridgeTurn(
-				ctx,
+				turnCtx,
 				c,
 				account,
 				token,
@@ -692,6 +737,41 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				turn,
 				writeClientMessage,
 			)
+			controlReader.detach(controlTurn)
+			cancelTurn(nil)
+			if result != nil {
+				result.TransportDetails = newUsageTransportDetails("ws", "http", "http_bridge", bridgeReason)
+			}
+			if IsOpenAIWSClientTurnCancelled(bridgeErr) {
+				if hooks != nil && hooks.AfterTurn != nil {
+					if result != nil {
+						hooks.AfterTurn(turn, result, nil)
+					} else {
+						hooks.AfterTurn(turn, nil, bridgeErr)
+					}
+				}
+				bridgeReplayInput, bridgeAccountFailoverInput = nil, nil
+				bridgeReplayInputExists, bridgeAccountFailoverInputExists = false, false
+				turnState = ""
+				if c.Request != nil {
+					c.Request.Header.Del(openAIWSTurnStateHeader)
+				}
+				setOpenAIWSHTTPBridgeToolState(c, openAIWSHTTPBridgeToolState{})
+				freshBridgeTurnRequired = true
+				nextMessage, readErr := readClientMessage()
+				if readErr != nil {
+					if isOpenAIWSClientDisconnectError(readErr) {
+						return nil
+					}
+					return readErr
+				}
+				nextPayload, parseErr := parseClientPayload(turn+1, nextMessage)
+				if parseErr != nil {
+					return parseErr
+				}
+				currentBridgePayload = nextPayload
+				continue
+			}
 			if bridgeErr != nil && isOpenAIWSSessionPreempted(ctx) {
 				return errOpenAIWSSessionPreempted
 			}
@@ -881,6 +961,9 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			return acquireTurnLease(turn, preferred, forcePreferredConn, forceNewConn)
 		}
 		if acquireErr != nil {
+			if turn == 1 {
+				markWSFallbackAcquireFailed(ctx)
+			}
 			if isOpenAIWSSessionPreempted(ctx) {
 				return nil, errOpenAIWSSessionPreempted
 			}
@@ -959,19 +1042,40 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 
 	var rejectedFieldRetryState *openAIResponsesRejectedFieldRetryState
 	sendAndRelay := func(turn int, lease *openAIWSConnLease, payload []byte, payloadBytes int, originalModel string, imageBillingModel string, imageSizeTier string, imageInputSize string, requestedReasoningEffort *string) (*OpenAIForwardResult, error) {
+		activeControlTurn := controlTurn
+		ctx, cancelTurn := context.WithCancelCause(ctx)
+		ctx = withOpenAIWSIngressControl(ctx, controlReader, activeControlTurn)
+		defer cancelTurn(nil)
+		defer controlReader.detach(activeControlTurn)
 		responseModelObserver := &upstreamResponseModelObserver{}
 		if lease == nil {
 			return nil, errors.New("upstream websocket lease is nil")
 		}
 		turnStart := time.Now()
 		wroteDownstream := false
+		if controlReader.cancelled(activeControlTurn) {
+			_ = writeClientMessage(buildOpenAIWSClientCancelledEvent("", originalModel, nil))
+			return nil, errOpenAIWSClientTurnCancelled
+		}
+		// A cancel received while the first create is blocked in Write must
+		// stop that write, not wait for sender installation after acceptance.
+		controlReader.install(activeControlTurn, nil, cancelTurn)
+		markWSFallbackSubmitted(ctx)
 		if err := lease.WriteJSONWithContextTimeout(ctx, json.RawMessage(payload), s.openAIWSWriteTimeout()); err != nil {
+			if controlReader.cancelled(activeControlTurn) {
+				lease.MarkBroken()
+				_ = writeClientMessage(buildOpenAIWSClientCancelledEvent("", originalModel, nil))
+				return nil, errOpenAIWSClientTurnCancelled
+			}
 			return nil, wrapOpenAIWSIngressTurnError(
 				"write_upstream",
 				fmt.Errorf("write upstream websocket request: %w", err),
 				false,
 			)
 		}
+		controlReader.install(activeControlTurn, func(control []byte) error {
+			return lease.WriteJSONWithContextTimeout(controlReader.ctx, json.RawMessage(control), min(s.openAIWSWriteTimeout(), 2*time.Second))
+		}, cancelTurn)
 		if debugEnabled {
 			logOpenAIWSModeDebug(
 				"ingress_ws_turn_request_sent account_id=%d turn=%d conn_id=%s payload_bytes=%d",
@@ -984,6 +1088,8 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 
 		responseID := ""
 		usage := OpenAIUsage{}
+		var cancellationUsage json.RawMessage
+		cancellationUsageKnown := false
 		imageCounter := newOpenAIImageOutputCounter()
 		var firstTokenMs *int
 		reqStream := openAIWSPayloadBoolFromRaw(payload, "stream", true)
@@ -1012,10 +1118,41 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				mappedModelBytes = []byte(mappedModel)
 			}
 		}
+		resultWithUsage := func(terminalEvent string) *OpenAIForwardResult {
+			result := &OpenAIForwardResult{
+				RequestID: responseID, Usage: usage, Model: originalModel, UpstreamModel: mappedModel,
+				UpstreamResponseModel: responseModelObserver.Model(), UpstreamResponseModelConflict: responseModelObserver.Conflict(), UpstreamResponseServiceTier: responseModelObserver.ServiceTier(),
+				ServiceTier:     resolvedOpenAIUpstreamServiceTierFromObserver(responseModelObserver, extractOpenAIServiceTierFromBody(payload)),
+				ReasoningEffort: ApplyThinkingEnabledFallback(extractOpenAIReasoningEffortFromBody(payload, mappedModel, originalModel), payload, mappedModel), RequestedReasoningEffort: requestedReasoningEffort,
+				Stream: reqStream, OpenAIWSMode: true, UpstreamTerminalEvent: terminalEvent, ResponseHeaders: lease.HandshakeHeaders(), Duration: time.Since(turnStart), FirstTokenMs: firstTokenMs,
+				TransportDetails: newUsageTransportDetails("ws", "ws", "ctx_pool", ""),
+			}
+			if replayInput := replayCollector.Items(); len(replayInput) > 0 {
+				result.wsReplayInput = replayInput
+				result.wsReplayInputExists = true
+			}
+			if imageCount := imageCounter.Count(); imageCount > 0 {
+				result.ImageCount = imageCount
+				result.ImageSize = imageSizeTier
+				result.ImageInputSize = imageInputSize
+				result.ImageOutputSizes = imageCounter.Sizes()
+				result.BillingModel = imageBillingModel
+			}
+			return result
+		}
 		for {
 			upstreamMessage, readErr := lease.ReadMessageWithContextTimeout(ctx, s.openAIWSReadTimeout())
 			if readErr != nil {
 				lease.MarkBroken()
+				if controlReader.cancelled(activeControlTurn) {
+					_ = writeClientMessage(buildOpenAIWSClientCancelledEvent(responseID, originalModel, cancellationUsage))
+					if !cancellationUsageKnown && imageCounter.Count() == 0 {
+						return nil, errOpenAIWSClientTurnCancelled
+					}
+					result := resultWithUsage("response.incomplete")
+					result.ClientCancelled = true
+					return result, errOpenAIWSClientTurnCancelled
+				}
 				return nil, wrapOpenAIWSIngressTurnError(
 					"read_upstream",
 					fmt.Errorf("read upstream websocket event: %w", readErr),
@@ -1031,6 +1168,10 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			if responseID == "" && eventResponseID != "" {
 				responseID = eventResponseID
 			}
+			if rawUsage, known := openAIWSCancellationUsage(upstreamMessage); len(rawUsage) > 0 {
+				cancellationUsage, cancellationUsageKnown = rawUsage, known
+				parseOpenAIWSResponseUsageFromCompletedEvent(upstreamMessage, &usage)
+			}
 			if eventType != "" {
 				eventCount++
 				if firstEventType == "" {
@@ -1040,6 +1181,17 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			}
 			if openAIWSMessageShouldParseUsage(eventType, upstreamMessage) {
 				parseOpenAIWSResponseUsageFromCompletedEvent(upstreamMessage, &usage)
+			}
+			if eventType == "error" && controlReader.cancelled(activeControlTurn) {
+				// A rejection of a stop frame must not trigger account failover or
+				// replay the request the user just stopped.
+				_ = writeClientMessage(buildOpenAIWSClientCancelledEvent(responseID, originalModel, cancellationUsage))
+				if !cancellationUsageKnown && imageCounter.Count() == 0 {
+					return nil, errOpenAIWSClientTurnCancelled
+				}
+				result := resultWithUsage("response.incomplete")
+				result.ClientCancelled = true
+				return result, errOpenAIWSClientTurnCancelled
 			}
 			if eventType == "error" || eventType == "response.failed" {
 				markOpenAICyberPolicyEvent(c, upstreamMessage, http.StatusOK, &usage)
@@ -1212,7 +1364,16 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				}
 			}
 			if isTerminalEvent {
-				terminalEvent := s.handleOpenAIWSTerminalTransientFailure(ctx, account, mappedModel, lease.HandshakeHeaders(), upstreamMessage)
+				if controlReader.cancelled(activeControlTurn) && !cancellationUsageKnown && imageCounter.Count() == 0 {
+					// Even if completion wins the stop race, absent usage is not
+					// evidence that a successful response consumed zero tokens.
+					return nil, errOpenAIWSClientTurnCancelled
+				}
+				clientCancelled := controlReader.cancelled(activeControlTurn) && !openAIWSTerminalCompletedBeforeCancel(eventType, upstreamMessage)
+				terminalEvent := normalizeOpenAIWSTerminalEvent(eventType)
+				if !clientCancelled {
+					terminalEvent = s.handleOpenAIWSTerminalTransientFailure(ctx, account, mappedModel, lease.HandshakeHeaders(), upstreamMessage)
+				}
 				// 客户端已断连时，上游连接的 session 状态不可信，标记 broken 避免回池复用。
 				if clientDisconnected {
 					lease.MarkBroken()
@@ -1238,35 +1399,14 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 						clientDisconnected,
 					)
 				}
-				imageCount := imageCounter.Count()
-				result := &OpenAIForwardResult{
-					RequestID:                     responseID,
-					Usage:                         usage,
-					Model:                         originalModel,
-					UpstreamModel:                 mappedModel,
-					UpstreamResponseModel:         responseModelObserver.Model(),
-					UpstreamResponseModelConflict: responseModelObserver.Conflict(),
-					UpstreamResponseServiceTier:   responseModelObserver.ServiceTier(),
-					ServiceTier:                   resolvedOpenAIUpstreamServiceTierFromObserver(responseModelObserver, extractOpenAIServiceTierFromBody(payload)),
-					ReasoningEffort:               ApplyThinkingEnabledFallback(extractOpenAIReasoningEffortFromBody(payload, mappedModel, originalModel), payload, mappedModel),
-					RequestedReasoningEffort:      requestedReasoningEffort,
-					Stream:                        reqStream,
-					OpenAIWSMode:                  true,
-					UpstreamTerminalEvent:         terminalEvent,
-					ResponseHeaders:               lease.HandshakeHeaders(),
-					Duration:                      time.Since(turnStart),
-					FirstTokenMs:                  firstTokenMs,
-				}
-				if replayInput := replayCollector.Items(); len(replayInput) > 0 {
-					result.wsReplayInput = replayInput
-					result.wsReplayInputExists = true
-				}
-				if imageCount > 0 {
-					result.ImageCount = imageCount
-					result.ImageSize = imageSizeTier
-					result.ImageInputSize = imageInputSize
-					result.ImageOutputSizes = imageCounter.Sizes()
-					result.BillingModel = imageBillingModel
+				result := resultWithUsage(terminalEvent)
+				if clientCancelled {
+					result.UpstreamTerminalEvent = openAIWSClientCancellationTerminal(upstreamMessage)
+					if !cancellationUsageKnown && result.ImageCount == 0 {
+						return nil, errOpenAIWSClientTurnCancelled
+					}
+					result.ClientCancelled = true
+					return result, errOpenAIWSClientTurnCancelled
 				}
 				return result, nil
 			}
@@ -1811,6 +1951,18 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		}
 
 		result, relayErr := sendAndRelay(turn, sessionLease, currentPayload, currentPayloadBytes, currentOriginalModel, currentImageBillingModel, currentImageSizeTier, currentImageInputSize, currentRequestedReasoningEffort)
+		if IsOpenAIWSClientTurnCancelled(relayErr) || (relayErr != nil && controlReader.cancelled(controlTurn)) {
+			if hooks != nil && hooks.AfterTurn != nil {
+				if result != nil && result.ClientCancelled {
+					hooks.AfterTurn(turn, result, nil)
+				} else {
+					hooks.AfterTurn(turn, nil, errOpenAIWSClientTurnCancelled)
+				}
+			}
+			lastTurnClean = false
+			sessionLease.MarkBroken()
+			return NewOpenAIWSClientCloseError(coderws.StatusNormalClosure, "response cancelled; reconnect to start a new request", errOpenAIWSClientTurnCancelled)
+		}
 		if relayErr != nil {
 			lastTurnClean = false
 			if isOpenAIWSSessionPreempted(ctx) {

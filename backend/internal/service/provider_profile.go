@@ -50,6 +50,9 @@ type ProviderProfile struct {
 // providerDefaultTestModel 返回账号连接测试未指定模型时的默认模型；非多协议供应商或
 // 未设置时为空。
 func (a *Account) providerDefaultTestModel() string {
+	if a.IsKimiOAuth() {
+		return "kimi-for-coding"
+	}
 	profile := a.providerProfile()
 	if profile == nil {
 		return ""
@@ -238,6 +241,12 @@ func (a *Account) providerProfile() *ProviderProfile {
 // defaultProviderBaseURL 按账号 account_mode 返回多协议供应商指定协议的官方默认基址；
 // 非多协议供应商或协议未知时为空串。
 func (a *Account) defaultProviderBaseURL(protocol string) string {
+	if a.IsKimiOAuth() {
+		if protocol == APIProtocolAnthropic {
+			return DefaultKimiCodingAnthropicBaseURL
+		}
+		return DefaultKimiCodingBaseURL
+	}
 	profile := a.providerProfile()
 	if profile == nil {
 		return ""

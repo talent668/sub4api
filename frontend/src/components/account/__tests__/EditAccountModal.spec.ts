@@ -330,6 +330,78 @@ function mountModal(account = buildAccount(), renderGroupSelector = false) {
 }
 
 describe('EditAccountModal', () => {
+  it('loads and preserves the WS preferred preset with the account connection pool', async () => {
+    const account = buildAccount()
+    account.extra = { ...account.extra, openai_native_ws_preferred: true, openai_apikey_responses_websockets_v2_mode: 'ctx_pool', retained_setting: 'keep' }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+    expect(wrapper.get<HTMLInputElement>('[data-testid="edit-native-ws-preferred"]').element.checked).toBe(true)
+    const modeSelect = wrapper.find('[data-testid="edit-openai-ws-mode-select"]')
+    expect(modeSelect.findAll('option').map(option => option.attributes('value'))).toEqual(['ctx_pool'])
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra).toMatchObject({ openai_native_ws_preferred: true, openai_apikey_responses_websockets_v2_mode: 'ctx_pool', retained_setting: 'keep' })
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_native_ws_only).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('switches from preferred to strict without retaining the fallback flag', async () => {
+    const account = buildAccount()
+    account.extra = { ...account.extra, openai_native_ws_preferred: true, openai_apikey_responses_websockets_v2_mode: 'ctx_pool' }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+    await wrapper.get('[data-testid="edit-native-ws-only"]').setValue(true)
+    expect(wrapper.get<HTMLInputElement>('[data-testid="edit-native-ws-preferred"]').element.checked).toBe(false)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_native_ws_only).toBe(true)
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_native_ws_preferred).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('switches from strict to preferred and can remove the preferred flag without clearing other settings', async () => {
+    const account = buildAccount()
+    account.extra = { ...account.extra, openai_native_ws_only: true, openai_apikey_responses_websockets_v2_mode: 'ctx_pool', retained_setting: 'keep' }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+    expect(wrapper.get<HTMLInputElement>('[data-testid="edit-native-ws-only"]').element.checked).toBe(true)
+    await wrapper.get('[data-testid="edit-native-ws-preferred"]').setValue(true)
+    expect(wrapper.get<HTMLInputElement>('[data-testid="edit-native-ws-only"]').element.checked).toBe(false)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_native_ws_preferred).toBe(true)
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_native_ws_only).toBeUndefined()
+    await wrapper.get('[data-testid="edit-native-ws-preferred"]').setValue(false)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[1]?.[1]?.extra?.openai_native_ws_preferred).toBeUndefined()
+    expect(updateAccountMock.mock.calls[1]?.[1]?.extra?.retained_setting).toBe('keep')
+    expect(updateAccountMock.mock.calls[1]?.[1]?.extra?.openai_apikey_responses_websockets_v2_mode).toBe('ctx_pool')
+    wrapper.unmount()
+  })
+
+  it('saves native WS policy on the selected account and allows opting out', async () => {
+    const account = buildAccount()
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+    await wrapper.get('[data-testid="edit-native-ws-only"]').setValue(true)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra).toMatchObject({ openai_native_ws_only: true, openai_apikey_responses_websockets_v2_mode: 'ctx_pool' })
+    wrapper.unmount()
+  })
+
+  it('removes the native-only flag without changing unrelated account settings', async () => {
+    const account = buildAccount()
+    account.extra = { ...account.extra, openai_native_ws_only: true, openai_apikey_responses_websockets_v2_mode: 'ctx_pool', retained_setting: 'keep' }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+    await wrapper.get('[data-testid="edit-native-ws-only"]').setValue(false)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_native_ws_only).toBeUndefined()
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.retained_setting).toBe('keep')
+    wrapper.unmount()
+  })
   beforeEach(() => {
     authIsSimpleMode.value = true
   })

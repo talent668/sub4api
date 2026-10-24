@@ -219,6 +219,64 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
 
   afterEach(() => vi.useRealTimers())
 
+  it('applies the native WS preset only to the account being created', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'OpenAI')
+    await selectButtonByText(wrapper, 'API Key')
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('native ws')
+    await wrapper.get('form#create-account-form input[type="password"]').setValue('test-key')
+    await wrapper.get('[data-testid="create-native-ws-only"]').setValue(true)
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(createAccountMock.mock.calls[0]?.[0]?.extra).toMatchObject({ openai_native_ws_only: true, openai_apikey_responses_websockets_v2_mode: 'ctx_pool' })
+    expect(createAccountMock.mock.calls[0]?.[0]?.credentials?.openai_capabilities ?? ['chat_completions', 'embeddings']).toContain('chat_completions')
+    wrapper.unmount()
+  })
+
+  it('creates a WS preferred preset and makes the two presets mutually exclusive', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'OpenAI')
+    await selectButtonByText(wrapper, 'API Key')
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('prefer native ws')
+    await wrapper.get('form#create-account-form input[type="password"]').setValue('test-key')
+    await wrapper.get('[data-testid="create-native-ws-only"]').setValue(true)
+    await wrapper.get('[data-testid="create-native-ws-preferred"]').setValue(true)
+    expect(wrapper.get<HTMLInputElement>('[data-testid="create-native-ws-only"]').element.checked).toBe(false)
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+    const extra = createAccountMock.mock.calls[0]?.[0]?.extra
+    expect(extra).toMatchObject({ openai_native_ws_preferred: true, openai_apikey_responses_websockets_v2_mode: 'ctx_pool', openai_apikey_responses_websockets_v2_enabled: true })
+    expect(extra?.openai_native_ws_only).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('clears the preferred preset when strict mode is selected', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'OpenAI')
+    await selectButtonByText(wrapper, 'API Key')
+    await wrapper.get('[data-testid="create-native-ws-preferred"]').setValue(true)
+    await wrapper.get('[data-testid="create-native-ws-only"]').setValue(true)
+    expect(wrapper.get<HTMLInputElement>('[data-testid="create-native-ws-preferred"]').element.checked).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('creates a Kimi OAuth account through device authorization without asking for an API key', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'Kimi')
+    await wrapper.get('input[type="radio"][value="oauth-based"]').setValue()
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('Kimi OAuth')
+    expect(wrapper.find('form#create-account-form input[type="password"]').exists()).toBe(false)
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+    const flow = wrapper.findComponent({ name: 'KimiDeviceAuthorization' })
+    expect(flow.exists()).toBe(true)
+    const credentials = { access_token: 'access', refresh_token: 'refresh', device_id: 'device', account_mode: 'coding', api_protocol: 'adaptive' }
+    flow.vm.$emit('authorized', credentials)
+    await flushPromises()
+    expect(createAccountMock.mock.calls[0]?.[0]).toMatchObject({ platform: 'kimi', type: 'oauth', name: 'Kimi OAuth', credentials })
+    wrapper.unmount()
+  })
+
   it('sets month and year expiry presets without submitting the account form', async () => {
     vi.useFakeTimers({ toFake: ['Date'] })
     vi.setSystemTime(new Date('2026-01-31T12:34:00'))

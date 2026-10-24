@@ -129,6 +129,7 @@
             <span data-testid="request-type-badge" class="inline-flex items-center rounded px-2 py-0.5 text-xs font-medium" :class="getRequestTypeBadgeClass(row)">
               {{ getRequestTypeLabel(row) }}
             </span>
+            <UsageTransportBadge :details="row.transport_details" />
             <span
               v-if="row.native_compaction_v2"
               data-testid="native-compaction-badge"
@@ -509,8 +510,8 @@
           </div>
           <div class="flex items-center justify-between gap-6">
             <span class="text-gray-400">{{ t('usage.transport') }}</span>
-            <span class="font-semibold" :class="tooltipData?.openai_ws_mode ? 'text-emerald-400' : 'text-gray-300'">
-              {{ tooltipData?.openai_ws_mode ? t('usage.transportWS') : t('usage.transportHTTP') }}
+            <span class="font-semibold">
+              <UsageTransportBadge :details="tooltipData?.transport_details" />
             </span>
           </div>
           <div v-if="fastChannel !== 'none'" class="flex items-center justify-between gap-6">
@@ -567,6 +568,7 @@ import { formatCacheTokens, formatMultiplier } from '@/utils/formatters'
 import { formatTokenPricePerMillion } from '@/utils/usagePricing'
 import { getUsageFastChannel, getUsageFastChannelLabel, getUsageServiceTierLabel } from '@/utils/usageServiceTier'
 import { resolveUsageRequestType } from '@/utils/usageRequestType'
+import UsageTransportBadge from '@/components/usage/UsageTransportBadge.vue'
 import {
   LATENCY_BAR_CLASSES,
   LATENCY_BAR_FROM_CLASSES,
@@ -724,7 +726,11 @@ const tooltipPosition = ref({ x: 0, y: 0 })
 const tooltipData = ref<AdminUsageLog | null>(null)
 // Fast/Ultra Fast only reaches the priority scheduler over the upstream WS path;
 // show that transport explicitly instead of relying on the uninformative echo.
-const fastChannel = computed(() => getUsageFastChannel(tooltipData.value?.service_tier, tooltipData.value?.openai_ws_mode))
+const fastChannel = computed(() => {
+  const upstream = tooltipData.value?.transport_details?.upstream
+  if (upstream !== 'http' && upstream !== 'ws') return 'none'
+  return getUsageFastChannel(tooltipData.value?.service_tier, upstream === 'ws')
+})
 
 // Tooltip state - token
 const tokenTooltipVisible = ref(false)

@@ -2003,12 +2003,24 @@
             </p>
           </div>
           <div class="w-52">
-            <Select v-model="openaiResponsesWebSocketV2Mode" data-testid="edit-openai-ws-mode-select" :options="openAIWSModeOptions" />
+            <Select v-model="openaiResponsesWebSocketV2Mode" data-testid="edit-openai-ws-mode-select" :options="availableOpenAIWSModeOptions" />
           </div>
         </div>
       </div>
 
       <!-- OpenAI APIKey Responses API support mode -->
+      <div v-if="account?.platform === 'openai' && (account.type === 'oauth' || account.type === 'setup-token' || account.type === 'apikey')" class="space-y-1">
+        <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200">
+          <input v-model="openaiNativeWSPreferred" type="checkbox" data-testid="edit-native-ws-preferred" class="text-primary-600" @change="applyNativeWSPreferredPreset" />
+          {{ t('admin.accounts.openai.nativeWSPreferred') }}
+        </label>
+        <p v-if="openaiNativeWSPreferred" class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.openai.nativeWSPreferredHint') }}</p>
+        <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200">
+          <input v-model="openaiNativeWSOnly" type="checkbox" data-testid="edit-native-ws-only" class="text-primary-600" @change="applyNativeWSPreset" />
+          {{ t('admin.accounts.openai.nativeWSOnly') }}
+        </label>
+        <p v-if="openaiNativeWSOnly" class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.openai.nativeWSOnlyHint') }}</p>
+      </div>
       <div
         v-if="account?.platform === 'openai' && account?.type === 'apikey'"
         class="space-y-4 border-t border-gray-200 pt-4 dark:border-dark-600"
@@ -3890,6 +3902,8 @@ const openAIResponsesMode = ref<OpenAIResponsesMode>('auto')
 const openAIImagesUrlToB64JsonEnabled = ref(false)
 const openAIEndpointCapabilities = ref<OpenAIEndpointCapability[]>(['chat_completions', 'embeddings'])
 const openaiOAuthResponsesWebSocketV2Mode = ref<OpenAIWSMode>(OPENAI_WS_MODE_OFF)
+const openaiNativeWSOnly = ref(false)
+const openaiNativeWSPreferred = ref(false)
 const openaiAPIKeyResponsesWebSocketV2Mode = ref<OpenAIWSMode>(OPENAI_WS_MODE_OFF)
 type CodexTicketAccountPolicy = 'inherit' | 'allow' | 'deny'
 const codexTicketAccountPolicy = ref<CodexTicketAccountPolicy>('inherit')
@@ -3959,6 +3973,25 @@ const openaiResponsesWebSocketV2Mode = computed({
 const openAIWSModeHintKey = computed(() =>
   resolveOpenAIWSModeHintKey(openaiResponsesWebSocketV2Mode.value)
 )
+
+const availableOpenAIWSModeOptions = computed(() => {
+  if (openaiNativeWSPreferred.value) return openAIWSModeOptions.value.filter(option => option.value === OPENAI_WS_MODE_CTX_POOL)
+  if (openaiNativeWSOnly.value) return openAIWSModeOptions.value.filter(option => option.value === OPENAI_WS_MODE_CTX_POOL || option.value === OPENAI_WS_MODE_PASSTHROUGH)
+  return openAIWSModeOptions.value
+})
+
+const applyNativeWSPreset = () => {
+  if (openaiNativeWSOnly.value) openaiNativeWSPreferred.value = false
+  if (openaiNativeWSOnly.value) openaiResponsesWebSocketV2Mode.value = OPENAI_WS_MODE_CTX_POOL
+  if (openaiNativeWSOnly.value && props.account?.type === 'apikey' && !openAIEndpointCapabilities.value.includes('chat_completions')) openAIEndpointCapabilities.value.push('chat_completions')
+}
+
+const applyNativeWSPreferredPreset = () => {
+  if (!openaiNativeWSPreferred.value) return
+  openaiNativeWSOnly.value = false
+  openaiResponsesWebSocketV2Mode.value = OPENAI_WS_MODE_CTX_POOL
+  if (props.account?.type === 'apikey' && !openAIEndpointCapabilities.value.includes('chat_completions')) openAIEndpointCapabilities.value.push('chat_completions')
+}
 const codexImageToolOptions = computed<Array<{
   value: CodexImageToolMode
   label: string
@@ -4395,6 +4428,8 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   openAIEndpointCapabilities.value = ['chat_completions', 'embeddings']
   openAICompactModelMappings.value = []
   openaiOAuthResponsesWebSocketV2Mode.value = OPENAI_WS_MODE_OFF
+  openaiNativeWSOnly.value = false
+  openaiNativeWSPreferred.value = false
   openaiAPIKeyResponsesWebSocketV2Mode.value = OPENAI_WS_MODE_OFF
   codexCLIOnlyEnabled.value = false
   codexCLIOnlyAppServerEnabled.value = false
@@ -4406,6 +4441,8 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   webSearchEmulationMode.value = 'default'
   if (newAccount.platform === 'openai' && (newAccount.type === 'oauth' || newAccount.type === 'setup-token' || newAccount.type === 'apikey')) {
     openaiPassthroughEnabled.value = extra?.openai_passthrough === true || extra?.openai_oauth_passthrough === true
+    openaiNativeWSOnly.value = extra?.openai_native_ws_only === true
+    openaiNativeWSPreferred.value = extra?.openai_native_ws_preferred === true && !openaiNativeWSOnly.value
     openAIRequestTimezone.value = typeof extra?.openai_request_timezone === 'string' ? extra.openai_request_timezone : 'Asia/Singapore'
     openaiFlattenNamespacesEnabled.value =
       newAccount.type === 'oauth' && extra?.openai_responses_flatten_namespaces === true
@@ -5954,6 +5991,10 @@ const handleSubmit = async () => {
         newExtra.openai_apikey_responses_websockets_v2_enabled = isOpenAIWSModeEnabled(openaiAPIKeyResponsesWebSocketV2Mode.value)
       }
       delete newExtra.responses_websockets_v2_enabled
+      if (openaiNativeWSOnly.value) newExtra.openai_native_ws_only = true
+      else delete newExtra.openai_native_ws_only
+      if (openaiNativeWSPreferred.value) newExtra.openai_native_ws_preferred = true
+      else delete newExtra.openai_native_ws_preferred
       delete newExtra.openai_ws_enabled
       if (openaiPassthroughEnabled.value) {
         newExtra.openai_passthrough = true

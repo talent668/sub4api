@@ -270,6 +270,7 @@ type OpenAIForwardResult struct {
 	RequestedReasoningEffort *string
 	Stream                   bool
 	OpenAIWSMode             bool
+	TransportDetails         *UsageTransportDetails
 	// UpstreamTerminalEvent is the normalized terminal event observed on an
 	// upstream Responses WebSocket turn. Empty preserves legacy/non-WS success.
 	UpstreamTerminalEvent string
@@ -277,6 +278,7 @@ type OpenAIForwardResult struct {
 	Duration              time.Duration
 	FirstTokenMs          *int
 	ClientDisconnect      bool
+	ClientCancelled       bool
 	ImageCount            int
 	ImageSize             string
 	ImageInputSize        string
@@ -461,6 +463,7 @@ type OpenAIGatewayService struct {
 	deferredService       *DeferredService
 	openAITokenProvider   *OpenAITokenProvider
 	grokTokenProvider     *GrokTokenProvider
+	kimiOAuthService      *KimiOAuthService
 	toolCorrector         *CodexToolCorrector
 	openaiWSResolver      OpenAIWSProtocolResolver
 	resolver              *ModelPricingResolver
@@ -1229,6 +1232,16 @@ func (s *OpenAIGatewayService) GetAccessToken(ctx context.Context, account *Acco
 	}
 	switch account.Type {
 	case AccountTypeOAuth:
+		if account.IsKimiOAuth() {
+			if prepared, _ := ctx.Value(kimiPreparedAccountContextKey{}).(*Account); prepared == account {
+				return account.GetCredential("access_token"), "oauth", nil
+			}
+			fresh, err := s.kimiOAuthService.GetAccount(ctx, account, false)
+			if err != nil {
+				return "", "", kimiUnavailableError(err)
+			}
+			return fresh.GetCredential("access_token"), "oauth", nil
+		}
 		if account.IsOpenAIAgentIdentity() {
 			return "", OpenAIAuthModeAgentIdentity, nil
 		}

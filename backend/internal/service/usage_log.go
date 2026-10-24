@@ -181,6 +181,7 @@ type UsageLog struct {
 	RequestType        RequestType
 	Stream             bool
 	OpenAIWSMode       bool
+	TransportDetails   *UsageTransportDetails
 	NativeCompactionV2 bool
 	DurationMs         *int
 	FirstTokenMs       *int

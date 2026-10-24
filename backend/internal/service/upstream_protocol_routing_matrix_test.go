@@ -310,6 +310,21 @@ func matchesKnownZhipuNonAPIKeyDifference(tc routingMatrixCase, want, got routin
 		reflect.DeepEqual(got, routingObservation{Error: "account 801 missing api_key", Status: http.StatusOK})
 }
 
+// The pinned main predates Kimi Code OAuth. This legacy driver deliberately
+// supplies only api_key and no OAuth service; all Kimi OAuth variants must now
+// fail closed before transport. Authorized routing is covered separately by
+// TestKimiOAuthGatewayUsesOfficialEndpointForEachProtocol.
+func matchesKnownKimiOAuthDifference(tc routingMatrixCase, want, got routingObservation) bool {
+	if tc.platform != PlatformKimi || tc.accountType != AccountTypeOAuth {
+		return false
+	}
+	validOld := false
+	for _, message := range []string{"access_token not found in credentials", "account 801 missing api_key", "get access token: access_token not found in credentials"} {
+		validOld = validOld || reflect.DeepEqual(want, routingObservation{Error: message, Status: http.StatusOK})
+	}
+	return validOld && reflect.DeepEqual(got, routingObservation{Error: `error: code=502 reason="KIMI_OAUTH_UNAVAILABLE" message="Kimi OAuth failed: kimi OAuth is unavailable" metadata=map[]`, Status: http.StatusOK})
+}
+
 func TestUpstreamProtocolRoutingMatrixMatchesMainGolden(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	data, err := os.ReadFile(routingMatrixGoldenPath)
@@ -325,6 +340,7 @@ func TestUpstreamProtocolRoutingMatrixMatchesMainGolden(t *testing.T) {
 	var differences []string
 	mismatched := 0
 	knownDifferences := 0
+	kimiOAuthDifferences := 0
 	for i, tc := range cases {
 		index := golden.Results[i]
 		require.GreaterOrEqual(t, index, 0)
@@ -338,6 +354,10 @@ func TestUpstreamProtocolRoutingMatrixMatchesMainGolden(t *testing.T) {
 			knownDifferences++
 			continue
 		}
+		if matchesKnownKimiOAuthDifference(tc, want, got) {
+			kimiOAuthDifferences++
+			continue
+		}
 		mismatched++
 		if len(differences) < 12 {
 			differences = append(differences, fmt.Sprintf("%s\nmain: %s\ncurrent: %s", tc.key(), want, got))
@@ -347,4 +367,6 @@ func TestUpstreamProtocolRoutingMatrixMatchesMainGolden(t *testing.T) {
 	// 2 account types × 4 modes × 3 probe states × 4 address configurations ×
 	// 2 model spellings. A disappeared or expanded exception requires review.
 	require.Equal(t, 192, knownDifferences, "unexpected change to the declared Zhipu non-API-Key difference")
+	// 6 protocols × 4 modes × 3 probes × 4 address variants × 4 ingresses × 2 spellings.
+	require.Equal(t, 2304, kimiOAuthDifferences, "unexpected change to Kimi OAuth's fail-closed contract")
 }

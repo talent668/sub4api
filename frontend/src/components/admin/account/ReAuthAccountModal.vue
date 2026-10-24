@@ -33,7 +33,9 @@
             }}</span>
             <span class="text-sm text-gray-500 dark:text-gray-400">
               {{
-                isOpenAI
+                isKimi
+                  ? 'Kimi Code'
+                  : isOpenAI
                   ? t('admin.accounts.openaiAccount')
                   : isGemini
                     ? t('admin.accounts.geminiAccount')
@@ -120,7 +122,9 @@
         </div>
       </div>
 
+      <KimiDeviceAuthorization v-if="isKimi && show" :key="account.id" :proxy-id="account.proxy_id" :busy="kimiSaving" @authorized="handleKimiAuthorized" />
       <OAuthAuthorizationFlow
+        v-else
         ref="oauthFlowRef"
         :add-method="addMethod"
         :auth-url="currentAuthUrl"
@@ -207,6 +211,7 @@ import type { Account } from '@/types'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
 import OAuthAuthorizationFlow from '@/components/account/OAuthAuthorizationFlow.vue'
+import KimiDeviceAuthorization from '@/components/account/KimiDeviceAuthorization.vue'
 
 // Type for exposed OAuthAuthorizationFlow component
 // Note: defineExpose automatically unwraps refs, so we use the unwrapped types
@@ -254,6 +259,20 @@ const isGemini = computed(() => props.account?.platform === 'gemini')
 const isAnthropic = computed(() => props.account?.platform === 'anthropic')
 const isAntigravity = computed(() => props.account?.platform === 'antigravity')
 const isGrok = computed(() => props.account?.platform === 'grok')
+const isKimi = computed(() => props.account?.platform === 'kimi')
+const kimiSaving = ref(false)
+const handleKimiAuthorized = async (credentials: Record<string, unknown>) => {
+  if (!props.account || kimiSaving.value) return
+  kimiSaving.value = true
+  try {
+    const account = await adminAPI.accounts.applyOAuthCredentials(props.account.id, { type: 'oauth', credentials })
+    appStore.showSuccess(t('admin.accounts.reAuthorizedSuccess'))
+    emit('reauthorized', account)
+    handleClose()
+  } catch {
+    appStore.showError(t('admin.accounts.kimiOAuth.saveFailed'))
+  } finally { kimiSaving.value = false }
+}
 
 /**
  * Grok reauth default tab (password auth is hidden):
@@ -302,6 +321,7 @@ const currentError = computed(() => {
 
 // Computed — footer "complete auth" only for code-exchange flows, not SSO/password/RT.
 const isManualInputMethod = computed(() => {
+  if (isKimi.value) return false
   const method = oauthFlowRef.value?.inputMethod
   if (method === 'sso_cookie' || method === 'email_password' || method === 'refresh_token') {
     return false

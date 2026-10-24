@@ -1,5 +1,18 @@
 export default {
     accounts: {
+      kimiOAuth: {
+        title: 'Kimi Code OAuth',
+        description: 'Connect your Coding plan through the official Kimi website. Get a device code, open the authorization page, and approve access. The account is saved automatically.',
+        userCode: 'Device code',
+        openLink: 'Authorize on Kimi',
+        waiting: 'Waiting for authorization on Kimi…',
+        authorized: 'Authorized. Saving your account; retry below if saving fails.',
+        start: 'Get authorization code',
+        starting: 'Getting a code…',
+        expired: 'The authorization code expired. Request a new code.',
+        failed: 'Kimi authorization failed. Request a new code and try again.',
+        saveFailed: 'Could not save the account. Please retry.'
+      },
       bps: {
         testInterrupted: 'The BPS test stream ended without a completion result.',
         riskTitle: "Account suspension risk",
@@ -772,6 +785,10 @@ export default {
         responsesWebsocketsV2Desc:
           'Disabled by default. Enable to allow responses_websockets_v2 capability (still gated by global and account-type switches).',
         wsMode: 'WS mode',
+        nativeWSOnly: 'Native WS only preset',
+        nativeWSPreferred: 'Prefer native WS (allow HTTP fallback)',
+        nativeWSPreferredHint: 'The client prefers native WS and falls back to HTTPS. This account uses the context pool and keeps HTTP requests on HTTP. Requires client WS/fallback support and gateway WS v2 with mode routing. Adds no automatic replay and applies only to new requests for this account; other accounts in mixed groups retain their own routing.',
+        nativeWSOnlyHint: 'Defaults to the WS context pool with its account connection limits; dedicated passthrough can be selected manually. HTTP bridging is forbidden and the client must use WS. Gateway WS v2 and mode routing must be enabled, otherwise connections are rejected. Applies to new connections without changing other accounts or global settings.',
         wsModeDesc:
           'Applies only to the current OpenAI account type. Select Off to disable WS. Other modes use the selected connection method only when gateway.openai_ws.mode_router_v2_enabled=true; otherwise, they use the context pool.',
         wsModeOff: 'Off (off)',

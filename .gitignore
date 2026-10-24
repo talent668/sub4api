@@ -1,5 +1,6 @@
 # 本地杂项文档、测试数据和外部项目副本
 /docs-local/
+/scratch/
 .codex
 
 # ===================
@@ -141,6 +142,8 @@ docs/*
 !docs/COMPOSITE_GROUPS.md
 !docs/OPENAI_GPT55_RETIREMENT.md
 !docs/openai-bps.md
+!docs/kimi-oauth.md
+!docs/native-ws-controls.md
 !docs/openai-bps-sources.md
 !docs/PLUGIN_DEVELOPMENT.md
 !docs/channel-monitor-v2-safe-defaults.md

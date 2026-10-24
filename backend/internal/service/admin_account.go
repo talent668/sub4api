@@ -411,6 +411,16 @@ func normalizeOpenAILongContextBillingUpdateExtra(account *Account, input *Updat
 // Grok media eligibility helpers live in account_grok_media_eligibility.go.
 
 func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]any) (*Account, error) {
+	if err := ValidateOpenAINativeWSPresetExtra(input.Platform, input.Type, accountExtra); err != nil {
+		return nil, err
+	}
+	if input.Platform == PlatformKimi && input.Type == AccountTypeOAuth {
+		credentials, err := normalizeKimiOAuthCredentials(input.Credentials)
+		if err != nil {
+			return nil, err
+		}
+		input.Credentials = credentials
+	}
 	if input.Platform == PlatformTypeSafe && input.Type != AccountTypeAPIKey {
 		return nil, errors.New("typesafe accounts only support apikey credentials")
 	}
@@ -594,6 +604,24 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	account, err := s.accountRepo.GetByID(ctx, id)
 	if err != nil {
 		return nil, err
+	}
+	effectiveKimiType := account.Type
+	if input.Type != "" {
+		effectiveKimiType = input.Type
+	}
+	effectiveNativeExtra := account.Extra
+	if input.Extra != nil {
+		effectiveNativeExtra = input.Extra
+	}
+	if err := ValidateOpenAINativeWSPresetExtra(account.Platform, effectiveKimiType, effectiveNativeExtra); err != nil {
+		return nil, err
+	}
+	if account.Platform == PlatformKimi && effectiveKimiType == AccountTypeOAuth && (input.Credentials != nil || input.Type != "") {
+		credentials, err := normalizeKimiOAuthCredentials(MergeCredentials(account.Credentials, input.Credentials))
+		if err != nil {
+			return nil, err
+		}
+		input.Credentials = credentials
 	}
 	if account.Platform == PlatformTypeSafe && input.Type != "" && input.Type != AccountTypeAPIKey {
 		return nil, errors.New("typesafe accounts only support apikey credentials")

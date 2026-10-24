@@ -373,6 +373,16 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 		return s.sendErrorAndEnd(c, "Account not found")
 	}
 	bindAccountTestPlatform(c, account)
+	if account.IsKimiOAuth() {
+		if s.openaiGatewayService == nil {
+			return s.sendErrorAndEnd(c, "Kimi OAuth is unavailable")
+		}
+		fresh, err := s.openaiGatewayService.kimiOAuthService.GetAccount(ctx, account, false)
+		if err != nil {
+			return s.sendErrorAndEnd(c, "Kimi OAuth token refresh failed")
+		}
+		account = fresh
+	}
 
 	// Synthetic UI load-test accounts exercise the real SSE parsing and modal
 	// interactions, but intentionally do not send their placeholder credentials

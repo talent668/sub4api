@@ -261,6 +261,27 @@ func TestAccountRepository_UpdateGrokOAuthCredentialsIfUnchanged_UsesExactAttemp
 	require.Equal(t, &proxyID, exec.execArgs[0][5])
 }
 
+func TestAccountRepository_KimiOAuthRefreshCASAndFailureIsolation(t *testing.T) {
+	exec := &recordingSQLExecutor{result: rowsAffectedResult(1)}
+	repo := newAccountRepositoryWithSQL(nil, exec, nil)
+	proxyID := int64(29)
+	old := map[string]any{"refresh_token": "old"}
+	applied, err := repo.UpdateKimiOAuthCredentialsIfUnchanged(context.Background(), 42, old, &proxyID, map[string]any{"refresh_token": "new"})
+	require.NoError(t, err)
+	require.True(t, applied)
+	require.Equal(t, service.PlatformKimi, exec.execArgs[0][2])
+	require.Contains(t, normalizeSQLWhitespace(exec.execQueries[0]), "credentials = $5::jsonb")
+	require.Contains(t, normalizeSQLWhitespace(exec.execQueries[0]), "INSERT INTO scheduler_outbox")
+	applied, err = repo.SetKimiOAuthRefreshErrorIfCredentialsUnchanged(context.Background(), 42, old, &proxyID, "reauthorize")
+	require.NoError(t, err)
+	require.True(t, applied)
+	require.Equal(t, service.PlatformKimi, exec.execArgs[1][3])
+	applied, err = repo.SetKimiOAuthRefreshTempUnschedulableIfCredentialsUnchanged(context.Background(), 42, old, &proxyID, time.Now(), "temporary")
+	require.NoError(t, err)
+	require.True(t, applied)
+	require.Equal(t, service.PlatformKimi, exec.execArgs[2][3])
+}
+
 func TestAccountRepository_ListOAuthRefreshCandidatePage_SQLFilter(t *testing.T) {
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	require.NoError(t, err)

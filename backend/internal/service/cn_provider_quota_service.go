@@ -20,7 +20,7 @@ import (
 
 // 国产供应商 Coding Plan 滚动窗口额度探测服务（Kimi For Coding / 智谱 GLM Coding Plan）。
 //
-// 与 grok_quota_service 不同：CN 供应商走数据面 API Key（无 OAuth token provider），
+// CN 供应商走数据面 API Key；Kimi OAuth 在探测前读取并按需刷新 Bearer Token。
 // 额度端点为只读 GET，解析 5h + weekly 两档滚动窗口并落 account.Extra 快照，
 // 供账号调度阈值评估（account_scheduling_threshold_eval.go）做主动停调。
 //
@@ -70,11 +70,12 @@ type CNProviderQuotaProbeResult struct {
 // CNProviderQuotaService 探测 Kimi / Zhipu / MiniMax Coding Plan、OpenCode Go、
 // Command Code 与 Cline（ClinePass）的滚动窗口用量。
 type CNProviderQuotaService struct {
-	accountRepo  AccountRepository
-	proxyRepo    ProxyRepository
-	httpUpstream HTTPUpstream
-	cfg          *config.Config
-	flight       singleflight.Group
+	kimiOAuthService *KimiOAuthService
+	accountRepo      AccountRepository
+	proxyRepo        ProxyRepository
+	httpUpstream     HTTPUpstream
+	cfg              *config.Config
+	flight           singleflight.Group
 }
 
 // NewCNProviderQuotaService 构造 Coding Plan 额度探测服务。
@@ -134,6 +135,13 @@ func (s *CNProviderQuotaService) QueryUsageForAccount(ctx context.Context, accou
 }
 
 func (s *CNProviderQuotaService) queryUsageForAccount(ctx context.Context, account *Account) (*CNProviderQuotaProbeResult, error) {
+	if account.IsKimiOAuth() {
+		fresh, err := s.kimiOAuthService.GetAccount(ctx, account, false)
+		if err != nil {
+			return nil, err
+		}
+		account = fresh
+	}
 	provider := account.GetCodingPlanProvider()
 	if provider == PlatformCommandCode {
 		return s.queryCommandCodeUsage(ctx, account)
@@ -207,6 +215,9 @@ func (s *CNProviderQuotaService) queryUsageForAccount(ctx context.Context, accou
 	}
 	// 探测与真实转发保持同一套账号级请求头覆写，避免探测通过但转发失败。
 	account.ApplyHeaderOverrides(req.Header)
+	if err := applyKimiOAuthRequestHeaders(req, account); err != nil {
+		return nil, err
+	}
 
 	resp, err := s.httpUpstream.Do(req, proxyURL, account.ID, maxInt(account.Concurrency, 1))
 	if err != nil {

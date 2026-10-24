@@ -51,6 +51,9 @@ func (s *OpenAIGatewayService) resolveAnthropicMessagesWSBridge(
 	if s == nil || account == nil || len(body) == 0 {
 		return base, false
 	}
+	if keepOpenAIHTTPIngressOnHTTP(ctx, nil, account) {
+		return base, false
+	}
 	if account.Platform != PlatformOpenAI || !account.UsesOpenAICodexProtocol() {
 		return base, false
 	}

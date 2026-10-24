@@ -104,6 +104,9 @@ func (s *OpenAIGatewayService) openAIWSHTTPBridgeThresholdBytes() int64 {
 }
 
 func (s *OpenAIGatewayService) shouldBridgeOpenAIWSHTTP(account *Account, payloadBytes int, previousResponseID string) bool {
+	if account.IsOpenAINativeWSOnly() {
+		return false
+	}
 	if account != nil && account.Platform == PlatformGrok {
 		return true
 	}
@@ -118,6 +121,9 @@ func (s *OpenAIGatewayService) shouldBridgeOpenAIWSHTTP(account *Account, payloa
 }
 
 func (s *OpenAIGatewayService) shouldBridgeOpenAIWSPassthroughFirstMessage(account *Account, payload []byte) bool {
+	if account.IsOpenAINativeWSOnly() {
+		return false
+	}
 	if account != nil && account.Platform == PlatformGrok {
 		return true
 	}
@@ -444,6 +450,10 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 		return nil, errors.New("client websocket writer is nil")
 	}
 	responseModelObserver := &upstreamResponseModelObserver{}
+	if openAIWSIngressTurnCancelled(ctx) {
+		_ = writeClientMessage(buildOpenAIWSClientCancelledEvent("", originalModel, nil))
+		return nil, errOpenAIWSClientTurnCancelled
+	}
 
 	body, err := prepareOpenAIWSHTTPBridgeBody(account, payload)
 	if err != nil {
@@ -501,6 +511,9 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 
 	buildUpstreamRequest := func(requestBody []byte) (*http.Request, error) {
 		upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
+		if _, controlled := openAIWSIngressControlFromContext(ctx); controlled {
+			upstreamCtx = ctx
+		}
 		defer releaseUpstreamCtx()
 		var upstreamReq *http.Request
 		var buildErr error
@@ -561,6 +574,10 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 		}
 		resp, err = s.doOpenAIUpstream(upstreamReq, proxyURL, account)
 		if err != nil {
+			if openAIWSIngressTurnCancelled(ctx) {
+				_ = writeClientMessage(buildOpenAIWSClientCancelledEvent("", originalModel, nil))
+				return nil, errOpenAIWSClientTurnCancelled
+			}
 			if turn == 1 {
 				return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, true)
 			}
@@ -632,6 +649,8 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 
 	responseID := ""
 	usage := OpenAIUsage{}
+	var cancellationUsage json.RawMessage
+	cancellationUsageKnown := false
 	imageCounter := newOpenAIImageOutputCounter()
 	var firstTokenMs *int
 	reqStream := openAIWSPayloadBoolFromRaw(body, "stream", true)
@@ -684,6 +703,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 			Duration:                      time.Since(turnStart),
 			FirstTokenMs:                  firstTokenMs,
 		}
+		result.TransportDetails = newUsageTransportDetails("ws", "http", "http_bridge", "")
 		if replayInput := replayCollector.Items(); len(replayInput) > 0 {
 			result.wsReplayInput = replayInput
 			result.wsReplayInputExists = true
@@ -774,6 +794,11 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 		responseModelObserver.ObserveOpenAI(upstreamMessage, eventType)
 		if responseID == "" && eventResponseID != "" {
 			responseID = eventResponseID
+		}
+		if rawUsage, known := openAIWSCancellationUsage(upstreamMessage); len(rawUsage) > 0 {
+			cancellationUsage = rawUsage
+			cancellationUsageKnown = known
+			parseOpenAIWSResponseUsageFromCompletedEvent(upstreamMessage, &usage)
 		}
 		if eventType != "" {
 			eventCount++
@@ -980,8 +1005,27 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 				firstTokenMsValue,
 				clientDisconnected,
 			)
+			if openAIWSIngressTurnCancelled(ctx) && (!openAIWSTerminalCompletedBeforeCancel(eventType, upstreamMessage) || (!cancellationUsageKnown && imageCounter.Count() == 0)) {
+				if !cancellationUsageKnown && imageCounter.Count() == 0 {
+					return nil, errOpenAIWSClientTurnCancelled
+				}
+				result := resultWithUsage()
+				result.ClientCancelled = true
+				result.UpstreamTerminalEvent = openAIWSClientCancellationTerminal(upstreamMessage)
+				return result, errOpenAIWSClientTurnCancelled
+			}
 			return resultWithUsage(), nil
 		}
+	}
+	if openAIWSIngressTurnCancelled(ctx) {
+		_ = writeClientMessage(buildOpenAIWSClientCancelledEvent(responseID, originalModel, cancellationUsage))
+		if !cancellationUsageKnown && imageCounter.Count() == 0 {
+			return nil, errOpenAIWSClientTurnCancelled
+		}
+		result := resultWithUsage()
+		result.ClientCancelled = true
+		result.UpstreamTerminalEvent = "response.incomplete"
+		return result, errOpenAIWSClientTurnCancelled
 	}
 	if bareErrorPending {
 		if finalizeErr := finalizeBareError(); finalizeErr != nil {

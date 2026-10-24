@@ -1115,6 +1115,16 @@ func (s *AccountTestService) buildAntigravityAPIKeyModelsRequest(ctx context.Con
 }
 
 func (s *AccountTestService) buildOpenAIUpstreamModelsRequest(ctx context.Context, account *Account) (*http.Request, error) {
+	if account.IsKimiOAuth() {
+		if s.openaiGatewayService == nil {
+			return nil, newUpstreamModelSyncConfigError("Kimi OAuth is unavailable", nil)
+		}
+		fresh, err := s.openaiGatewayService.kimiOAuthService.GetAccount(ctx, account, false)
+		if err != nil {
+			return nil, newUpstreamModelSyncUpstreamError("Failed to refresh Kimi OAuth credentials", err)
+		}
+		account = fresh
+	}
 	if account.IsOpenAIOAuth() {
 		return s.buildOpenAIOAuthUpstreamModelsRequest(ctx, account)
 	}
@@ -1124,7 +1134,7 @@ func (s *AccountTestService) buildOpenAIUpstreamModelsRequest(ctx context.Contex
 // buildOpenAIAPIKeyModelsRequest is shared by admin discovery and public model
 // listing. Codex content negotiation is intentionally absent from this request.
 func buildOpenAIAPIKeyModelsRequest(ctx context.Context, account *Account, validateBaseURL func(string) (string, error)) (*http.Request, error) {
-	if account.Type != AccountTypeAPIKey {
+	if account.Type != AccountTypeAPIKey && !account.IsKimiOAuth() {
 		return nil, newUpstreamModelSyncUnsupportedError(
 			fmt.Sprintf("Unsupported OpenAI account type for upstream model sync: %s", account.Type), nil,
 		)
@@ -1153,6 +1163,9 @@ func buildOpenAIAPIKeyModelsRequest(ctx context.Context, account *Account, valid
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	// 账号级请求头覆写：模型列表探测与真实转发保持一致的最终头
 	account.ApplyHeaderOverrides(req.Header)
+	if err := applyKimiOAuthRequestHeaders(req, account); err != nil {
+		return nil, err
+	}
 	return req, nil
 }
 

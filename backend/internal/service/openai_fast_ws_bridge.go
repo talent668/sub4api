@@ -35,6 +35,9 @@ func (s *OpenAIGatewayService) resolveOpenAIFastWSBridgeDecision(
 	if s == nil || account == nil || c == nil {
 		return baseDecision, false
 	}
+	if keepOpenAIHTTPIngressOnHTTP(ctx, c, account) {
+		return baseDecision, false
+	}
 	if GetOpenAIClientTransport(c) != OpenAIClientTransportHTTP {
 		return baseDecision, false
 	}

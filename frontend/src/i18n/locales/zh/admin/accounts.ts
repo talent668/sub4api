@@ -1,5 +1,18 @@
 export default {
     accounts: {
+      kimiOAuth: {
+        title: 'Kimi Code OAuth',
+        description: '通过 Kimi 官网授权接入 Coding 套餐。获取验证码后打开授权页面，确认授权后会自动保存账号。',
+        userCode: '设备验证码',
+        openLink: '前往 Kimi 官网授权',
+        waiting: '等待你在 Kimi 官网确认授权…',
+        authorized: '授权成功，正在保存账号。如保存失败，可点击下方按钮重试。',
+        start: '获取授权验证码',
+        starting: '正在获取验证码…',
+        expired: '授权验证码已过期，请重新获取。',
+        failed: 'Kimi 授权暂时失败，请重新获取验证码后重试。',
+        saveFailed: '账号保存失败，请重试。'
+      },
       bps: {
         testInterrupted: 'BPS 测试流已中断，未收到完成结果。',
         riskTitle: "封号风险提示",
@@ -889,6 +902,10 @@ export default {
         responsesWebsocketsV2Desc:
           '默认关闭。开启后可启用 responses_websockets_v2 协议能力（受网关全局开关与账号类型开关约束）。',
         wsMode: 'WS mode',
+        nativeWSOnly: '仅原生 WS 预设',
+        nativeWSPreferred: '原生 WS 优先（允许 HTTP 回退）',
+        nativeWSPreferredHint: '客户端优先连接原生 WS，失败后由客户端回退 HTTPS。本账号使用上下文池，HTTP 请求保持 HTTP；需客户端支持 WS 及回退，网关启用 WS v2 和模式路由。此预设不新增自动重放，仅作用于此账号的新请求；混合分组中的其他账号仍按各自设置路由。',
+        nativeWSOnlyHint: '默认使用受连接池上限约束的 WS 上下文池，也可手动选择独立透传。禁止转为 HTTP，客户端也需使用 WS；网关需启用 WS v2 和模式路由，否则明确拒绝连接。只影响新连接，不修改其他账号或全局设置。',
         wsModeDesc:
           '仅对当前 OpenAI 账号类型生效。选择“关闭”可禁用 WS；其余模式需全局 gateway.openai_ws.mode_router_v2_enabled=true 才按所选方式连接，未开启时统一使用上下文池。',
         wsModeOff: '关闭（off）',

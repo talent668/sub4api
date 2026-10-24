@@ -60,6 +60,9 @@ func RegisterAdminRoutes(
 
 		// Grok OAuth
 		registerGrokOAuthRoutes(admin, h)
+		kimi := admin.Group("/kimi/oauth")
+		kimi.POST("/device", h.Admin.KimiOAuth.StartDevice)
+		kimi.POST("/poll", h.Admin.KimiOAuth.PollDevice)
 
 		// 国产供应商（kimi/zhipu/deepseek）额度与余额
 		registerCNProviderRoutes(admin, h)

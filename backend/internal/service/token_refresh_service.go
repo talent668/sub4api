@@ -836,6 +836,9 @@ func (s *TokenRefreshService) refreshWithRetryWithRateGate(
 	refreshWindow time.Duration,
 	gate refreshAttemptGate,
 ) error {
+	if account.IsKimiOAuth() && (s.refreshAPI == nil || executor == nil) {
+		return &providerConfigurationRefreshError{err: errors.New("kimi OAuth requires coordinated credential refresh")}
+	}
 	var lastErr error
 	maxRetries := s.maxRetries()
 
@@ -984,6 +987,9 @@ func (s *TokenRefreshService) refreshWithRetryWithRateGate(
 
 		// 不可重试错误（invalid_grant/invalid_client 等）直接标记 error 状态并返回
 		if isNonRetryableRefreshError(err) {
+			if account.IsKimiOAuth() {
+				return s.containKimiRefreshFailure(ctx, account, err, true)
+			}
 			errorMsg := "Token refresh failed (non-retryable): " + logredact.RedactText(err.Error())
 			isGrokOAuth := account.IsGrokOAuth()
 			if !isGrokOAuth {
@@ -1087,6 +1093,9 @@ func (s *TokenRefreshService) refreshWithRetryWithRateGate(
 	if lastErr != nil {
 		reason += ": " + logredact.RedactText(lastErr.Error())
 	}
+	if account.IsKimiOAuth() {
+		return s.containKimiRefreshFailure(ctx, account, lastErr, false)
+	}
 	if account.IsGrokOAuth() {
 		conditionalRepo, ok := s.accountRepo.(GrokOAuthRefreshMutationRepository)
 		if !ok {
@@ -1158,6 +1167,12 @@ func (s *TokenRefreshService) retryBackoff(accountID int64, attempt int) time.Du
 
 // postRefreshActions 刷新成功后的后续动作（清除错误状态、缓存失效、调度器同步等）
 func (s *TokenRefreshService) postRefreshActions(ctx context.Context, account *Account) {
+	// Kimi publishes durable scheduler invalidation in its credential CAS.
+	// Token rotation must not clear a quota/security cooldown or republish a
+	// snapshot captured before a concurrent admin change.
+	if account.IsKimiOAuth() {
+		return
+	}
 	s.clearAntigravityForceTokenRefresh(ctx, account, "success")
 
 	// Antigravity 账户：如果之前是因为缺少 project_id 而标记为 error，现在成功获取到了，清除错误状态
@@ -1217,6 +1232,9 @@ func (s *TokenRefreshService) postRefreshStateSyncWithCleanup(parent context.Con
 }
 
 func (s *TokenRefreshService) postRefreshStateSync(ctx context.Context, account *Account) {
+	if account.IsKimiOAuth() {
+		return
+	}
 	// 对所有 OAuth 账号调用缓存失效（InvalidateToken 内部根据平台判断是否需要处理）
 	if s.cacheInvalidator != nil && account.Type == AccountTypeOAuth {
 		if err := s.cacheInvalidator.InvalidateToken(ctx, account); err != nil {

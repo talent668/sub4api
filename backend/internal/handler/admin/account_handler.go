@@ -49,6 +49,7 @@ func NewOAuthHandler(oauthService *service.OAuthService) *OAuthHandler {
 
 // AccountHandler handles admin account management
 type AccountHandler struct {
+	kimiOAuthService        *service.KimiOAuthService
 	claudeResetCredits      claudeResetReader
 	adminService            service.AdminService
 	oauthService            *service.OAuthService
@@ -1455,6 +1456,10 @@ func (h *AccountHandler) PreviewFromCRS(c *gin.Context) {
 // refreshSingleAccount refreshes credentials for a single OAuth account.
 // Returns (updatedAccount, warning, error) where warning is used for Antigravity ProjectIDMissing scenario.
 func (h *AccountHandler) refreshSingleAccount(ctx context.Context, account *service.Account) (*service.Account, string, error) {
+	if account.IsKimiOAuth() {
+		fresh, err := h.kimiOAuthService.GetAccount(ctx, account, true)
+		return fresh, "", err
+	}
 	if account.IsOpenAIBPS() {
 		return nil, "", infraerrors.BadRequest("BPS_MANUAL_TOKEN_ONLY", "Replace access_token in the BPS account settings; automatic refresh is unsupported")
 	}

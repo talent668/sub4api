@@ -1617,6 +1617,14 @@ func (r *accountRepository) UpdateGrokOAuthCredentialsIfUnchanged(
 	expectedProxyID *int64,
 	credentials map[string]any,
 ) (bool, error) {
+	return r.updateOAuthCredentialsIfUnchanged(ctx, id, expectedCredentials, expectedProxyID, credentials, service.PlatformGrok)
+}
+
+func (r *accountRepository) UpdateKimiOAuthCredentialsIfUnchanged(ctx context.Context, id int64, expectedCredentials map[string]any, expectedProxyID *int64, credentials map[string]any) (bool, error) {
+	return r.updateOAuthCredentialsIfUnchanged(ctx, id, expectedCredentials, expectedProxyID, credentials, service.PlatformKimi)
+}
+
+func (r *accountRepository) updateOAuthCredentialsIfUnchanged(ctx context.Context, id int64, expectedCredentials map[string]any, expectedProxyID *int64, credentials map[string]any, platform string) (bool, error) {
 	if r == nil || r.sql == nil {
 		return false, errors.New("account repository SQL executor is not configured")
 	}
@@ -1646,7 +1654,7 @@ func (r *accountRepository) UpdateGrokOAuthCredentialsIfUnchanged(
 	`,
 		string(credentialsJSON),
 		id,
-		service.PlatformGrok,
+		platform,
 		service.AccountTypeOAuth,
 		string(expectedJSON),
 		expectedProxyID,
@@ -1677,6 +1685,14 @@ func (r *accountRepository) SetGrokOAuthRefreshErrorIfCredentialsUnchanged(
 	expectedProxyID *int64,
 	errorMsg string,
 ) (bool, error) {
+	return r.setOAuthRefreshErrorIfCredentialsUnchanged(ctx, id, expectedCredentials, expectedProxyID, errorMsg, service.PlatformGrok)
+}
+
+func (r *accountRepository) SetKimiOAuthRefreshErrorIfCredentialsUnchanged(ctx context.Context, id int64, credentials map[string]any, proxyID *int64, message string) (bool, error) {
+	return r.setOAuthRefreshErrorIfCredentialsUnchanged(ctx, id, credentials, proxyID, message, service.PlatformKimi)
+}
+
+func (r *accountRepository) setOAuthRefreshErrorIfCredentialsUnchanged(ctx context.Context, id int64, expectedCredentials map[string]any, expectedProxyID *int64, errorMsg, platform string) (bool, error) {
 	if r == nil || r.sql == nil {
 		return false, errors.New("account repository SQL executor is not configured")
 	}
@@ -1706,7 +1722,7 @@ func (r *accountRepository) SetGrokOAuthRefreshErrorIfCredentialsUnchanged(
 		service.StatusError,
 		errorMsg,
 		id,
-		service.PlatformGrok,
+		platform,
 		service.AccountTypeOAuth,
 		service.StatusActive,
 		string(expectedJSON),
@@ -1738,6 +1754,14 @@ func (r *accountRepository) SetGrokOAuthRefreshTempUnschedulableIfCredentialsUnc
 	until time.Time,
 	reason string,
 ) (bool, error) {
+	return r.setOAuthRefreshCooldownIfCredentialsUnchanged(ctx, id, expectedCredentials, expectedProxyID, until, reason, service.PlatformGrok)
+}
+
+func (r *accountRepository) SetKimiOAuthRefreshTempUnschedulableIfCredentialsUnchanged(ctx context.Context, id int64, credentials map[string]any, proxyID *int64, until time.Time, reason string) (bool, error) {
+	return r.setOAuthRefreshCooldownIfCredentialsUnchanged(ctx, id, credentials, proxyID, until, reason, service.PlatformKimi)
+}
+
+func (r *accountRepository) setOAuthRefreshCooldownIfCredentialsUnchanged(ctx context.Context, id int64, expectedCredentials map[string]any, expectedProxyID *int64, until time.Time, reason, platform string) (bool, error) {
 	if r == nil || r.sql == nil {
 		return false, errors.New("account repository SQL executor is not configured")
 	}
@@ -1767,7 +1791,7 @@ func (r *accountRepository) SetGrokOAuthRefreshTempUnschedulableIfCredentialsUnc
 		until,
 		reason,
 		id,
-		service.PlatformGrok,
+		platform,
 		service.AccountTypeOAuth,
 		service.StatusActive,
 		string(expectedJSON),

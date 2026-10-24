@@ -472,6 +472,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		}
 	}
 	resultWithUsage := func() *OpenAIForwardResult {
+		observeUsageTransport(ctx, "ws", "ctx_pool")
 		return &OpenAIForwardResult{
 			RequestID:                     responseID,
 			ResponseID:                    responseID,

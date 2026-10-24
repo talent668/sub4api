@@ -181,6 +181,9 @@ func (api *OAuthRefreshAPI) RefreshIfNeeded(
 		return nil, errors.New("oauth refresh executor is nil")
 	}
 	requestPath := isOAuthRefreshRequestPath(ctx)
+	if account.IsKimiOAuth() && api.tokenCache == nil {
+		return nil, errors.New("kimi OAuth refresh lock is unavailable")
+	}
 	cacheKey := executor.CacheKey(account)
 
 	// 0. 获取进程内互斥锁（防止同一进程内的并发刷新竞争）
@@ -194,6 +197,9 @@ func (api *OAuthRefreshAPI) RefreshIfNeeded(
 	if api.tokenCache != nil {
 		acquired, lockErr := api.tokenCache.AcquireRefreshLock(ctx, cacheKey, api.lockTTL)
 		if lockErr != nil {
+			if account.IsKimiOAuth() {
+				return nil, errors.New("kimi OAuth refresh lock is unavailable")
+			}
 			// Redis 错误，降级为无锁刷新（进程内互斥锁仍生效）
 			slog.Warn("oauth_refresh_lock_failed_degraded",
 				"account_id", account.ID,
@@ -293,7 +299,24 @@ func (api *OAuthRefreshAPI) RefreshIfNeeded(
 	// 5. 设置版本号 + 更新 DB
 	if newCredentials != nil {
 		newCredentials["_token_version"] = time.Now().UnixMilli()
-		if freshAccount.IsGrokOAuth() {
+		if freshAccount.IsKimiOAuth() {
+			repo, ok := api.accountRepo.(KimiOAuthRefreshRepository)
+			if !ok {
+				return nil, errors.New("kimi OAuth conditional credential storage is unavailable")
+			}
+			applied, err := repo.UpdateKimiOAuthCredentialsIfUnchanged(ctx, freshAccount.ID, attemptedAccount.Credentials, attemptedAccount.ProxyID, newCredentials)
+			if err != nil {
+				return nil, &providerCycleContainmentRefreshError{err: errors.New("kimi OAuth refreshed but credentials could not be persisted")}
+			}
+			current, err := api.accountRepo.GetByID(ctx, freshAccount.ID)
+			if err != nil || current == nil {
+				return nil, &providerCycleContainmentRefreshError{err: errors.New("kimi OAuth durable credentials are unavailable")}
+			}
+			if !applied {
+				return &OAuthRefreshResult{Account: current}, nil
+			}
+			freshAccount = current
+		} else if freshAccount.IsGrokOAuth() {
 			conditionalRepo, ok := api.accountRepo.(GrokOAuthRefreshSuccessRepository)
 			if !ok {
 				return nil, &providerConfigurationRefreshError{

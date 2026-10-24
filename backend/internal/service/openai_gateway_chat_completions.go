@@ -61,7 +61,12 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 	promptCacheKey string,
 	defaultMappedModel string,
 ) (*OpenAIForwardResult, error) {
-	return s.forwardAsChatCompletions(ctx, c, account, body, promptCacheKey, defaultMappedModel, false)
+	if err := s.requireNativeWSClient(c, account, "chat"); err != nil {
+		return nil, err
+	}
+	ctx, trace := withUsageTransportTrace(ctx, c)
+	result, err := s.forwardAsChatCompletions(ctx, c, account, body, promptCacheKey, defaultMappedModel, false)
+	return trace.finish(result), err
 }
 
 func (s *OpenAIGatewayService) forwardAsChatCompletions(
@@ -73,6 +78,14 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 	defaultMappedModel string,
 	compatPromptCacheTenantIsolated bool,
 ) (*OpenAIForwardResult, error) {
+	if account.IsKimiOAuth() {
+		fresh, err := s.prepareKimiOAuthAccount(ctx, c, account)
+		if err != nil {
+			return nil, err
+		}
+		account = fresh
+		ctx = context.WithValue(ctx, kimiPreparedAccountContextKey{}, account)
+	}
 	rememberOpenCodeInboundBody(c, body)
 	beginUpstreamResponseModelObservation(c)
 	ClearActualOpenAIUpstreamEndpoint(c)

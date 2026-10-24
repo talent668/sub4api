@@ -1787,6 +1787,14 @@ export interface CodexSessionImportResult {
 
 export type RedeemCodeType = 'balance' | 'concurrency' | 'subscription' | 'invitation'
 export type UsageRequestType = 'unknown' | 'sync' | 'stream' | 'ws_v2' | 'cyber' | 'live'
+
+export interface UsageTransportDetails {
+  client: 'http' | 'ws'
+  upstream: 'http' | 'ws'
+  mode?: 'ctx_pool' | 'passthrough' | 'http_bridge' | 'http_ws_bridge'
+  fallback_reason?: 'large_payload' | 'plugin_http_bridge' | 'provider_http_bridge' | 'ws_failure'
+  client_ws_failure?: { attempt_id: string; evidence: 'receipt_v1' }
+}
 export type ImageSizeSource = 'output' | 'input' | 'default' | 'legacy'
 export type ImageSizeBreakdown = Record<string, number>
 
@@ -1825,6 +1833,7 @@ export interface UsageLog {
   request_type?: UsageRequestType
   stream: boolean
   openai_ws_mode?: boolean
+  transport_details?: UsageTransportDetails | null
   native_compaction_v2: boolean
   duration_ms: number | null
   first_token_ms: number | null

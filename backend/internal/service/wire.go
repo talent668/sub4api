@@ -12,6 +12,7 @@ import (
 	"github.com/MACOS-DO/sub4api/internal/pkg/antigravity"
 	"github.com/MACOS-DO/sub4api/internal/pkg/claude"
 	"github.com/MACOS-DO/sub4api/internal/pkg/logger"
+	"github.com/MACOS-DO/sub4api/internal/pkg/redissession"
 	"github.com/MACOS-DO/sub4api/internal/pkg/xai"
 	"github.com/gin-gonic/gin"
 	"github.com/google/wire"
@@ -25,6 +26,13 @@ func ProvideGrokOAuthService(proxyRepo ProxyRepository, oauthClient GrokOAuthCli
 	if redisClient != nil {
 		svc = svc.WithSessionStore(xai.NewRedisSessionStore(redisClient))
 	}
+	return svc
+}
+
+func ProvideKimiOAuthService(proxyRepo ProxyRepository, accountRepo AccountRepository, client KimiOAuthClient, redisClient *redis.Client, refreshAPI *OAuthRefreshAPI, gateway *OpenAIGatewayService) *KimiOAuthService {
+	store := redissession.New(redisClient, "oauth:session:kimi", 15*time.Minute)
+	svc := NewKimiOAuthService(proxyRepo, accountRepo, client, store, refreshAPI)
+	gateway.kimiOAuthService = svc
 	return svc
 }
 
@@ -127,6 +135,7 @@ func ProvideTokenRefreshService(
 	geminiOAuthService *GeminiOAuthService,
 	antigravityOAuthService *AntigravityOAuthService,
 	grokOAuthService *GrokOAuthService,
+	kimiOAuthService *KimiOAuthService,
 	cacheInvalidator TokenCacheInvalidator,
 	schedulerCache SchedulerCache,
 	cfg *config.Config,
@@ -141,6 +150,7 @@ func ProvideTokenRefreshService(
 	svc.SetPrivacyDeps(privacyClientFactory, proxyRepo)
 	// 注入统一 OAuth 刷新 API（消除 TokenRefreshService 与 TokenProvider 之间的竞争条件）
 	svc.SetRefreshAPI(refreshAPI)
+	svc.SetKimiOAuthService(kimiOAuthService)
 	// 调用侧显式注入后台刷新策略，避免策略漂移
 	svc.SetRefreshPolicy(DefaultBackgroundRefreshPolicy())
 	svc.SetAccountRuntimeBlocker(runtimeBlocker)
@@ -303,8 +313,11 @@ func ProvideCNProviderQuotaService(
 	proxyRepo ProxyRepository,
 	httpUpstream HTTPUpstream,
 	cfg *config.Config,
+	kimiOAuthService *KimiOAuthService,
 ) *CNProviderQuotaService {
-	return NewCNProviderQuotaService(accountRepo, proxyRepo, httpUpstream, cfg)
+	svc := NewCNProviderQuotaService(accountRepo, proxyRepo, httpUpstream, cfg)
+	svc.kimiOAuthService = kimiOAuthService
+	return svc
 }
 
 // ProvideCNProviderBalanceService 构造国产供应商余额探测服务。
@@ -898,6 +911,7 @@ var ProviderSet = wire.NewSet(
 	ProvideClaudeResetCreditService,
 	ProvideOpenAIOAuthService,
 	ProvideGrokOAuthService,
+	ProvideKimiOAuthService,
 	wire.Bind(new(GrokOAuthTokenService), new(*GrokOAuthService)),
 	NewGeminiOAuthService,
 	ProvideGeminiCachedContentService,
